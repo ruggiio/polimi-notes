@@ -216,6 +216,24 @@ python main.py transcribe-only output\videos\lecture.mp4
 python main.py run "https://..." --course "COURSE NAME" --no-cleanup
 ```
 
+### Split lectures (professor records two separate sessions on the same day)
+
+```bat
+# First recording
+python main.py run "https://...first_url..." --course "SMART MATERIALS" --suffix "Structural Steel"
+
+# Second recording
+python main.py run "https://...second_url..." --course "SMART MATERIALS" --suffix "Heat Treatment"
+```
+
+Produces:
+```
+output\notes\05-03-2026_SMART MATERIALS - Structural Steel.pdf
+output\notes\05-03-2026_SMART MATERIALS - Heat Treatment.pdf
+```
+
+Without `--suffix`, the pipeline behaves normally and overwrites the previous run.
+
 ---
 
 ## Output Structure

@@ -53,7 +53,7 @@ LATEX OUTPUT RULES:
 21. Always include \\usepackage[utf8]{inputenc} and \\usepackage{enumitem} in the preamble.
 22. Define \\newtheorem for: theorem, definition, lemma, example, remark.
 23. Always wrap \\begin{cases} inside math mode: use \\[ \\begin{cases}...\\end{cases} \\] or $\\begin{cases}...\\end{cases}$ — never use \\begin{cases} outside math mode.
-24. Never use Unicode characters anywhere in the output — this includes subscripts (₁₂₃), superscripts (⁰¹²), Greek letters (σ, α, β, ω), degree symbols (°), or any non-ASCII character. Always use LaTeX equivalents: $\sigma$, $\alpha$, $\beta$, $\omega$, $^{\circ}$ or \textdegree{}.
+24. Never use Unicode subscripts or superscripts (₁₂₃⁰¹²) — always use LaTeX math notation: $\\text{Ni}_3\\text{Ti}$, $\\text{Fe}_2\\text{Mo}$, $\\text{CO}_2$.
 """
 
 
@@ -296,12 +296,12 @@ def _clean_latex(raw: str) -> str:
     return raw.strip()
 
 
-def _make_pdf_filename(course_name: str, lecture_date: str) -> str:
+def _make_pdf_filename(course_name: str, lecture_date: str, suffix: str = None) -> str:
     """
     Generate a clean PDF filename in European date format.
     e.g. '08-10-2025_Methods and Technologies for Feedback Control Systems.pdf'
+    e.g. '08-10-2025_SMART MATERIALS - Structural Steel.pdf' (with suffix)
     """
-    # Convert date from YYYY-MM-DD to DD-MM-YYYY
     try:
         parts = lecture_date.split("-")
         if len(parts) == 3:
@@ -311,21 +311,27 @@ def _make_pdf_filename(course_name: str, lecture_date: str) -> str:
     except Exception:
         date_eu = lecture_date
 
-    # Sanitize course name for filesystem (remove characters not allowed in filenames)
-    safe_course = re.sub(r'[<>:"/\\|?*]', '', course_name)
-    safe_course = safe_course.strip()
+    safe_course = re.sub(r'[<>:"/\\|?*]', '', course_name).strip()
+    filename = f"{date_eu}_{safe_course}"
+    if suffix:
+        safe_suffix = re.sub(r'[<>:"/\\|?*]', '', suffix).strip()
+        filename += f" - {safe_suffix}"
+    return f"{filename}.pdf"
 
-    return f"{date_eu}_{safe_course}.pdf"
 
-
-def compile_pdf(tex_path: Path, pdf_output_dir: Path, course_name: str, lecture_date: str) -> Path | None:
+def compile_pdf(
+    tex_path: Path,
+    pdf_output_dir: Path,
+    course_name: str,
+    lecture_date: str,
+    suffix: str = None,
+) -> Path | None:
     """
     Compile the .tex file and save the PDF to pdf_output_dir with a descriptive filename.
     The .tex is compiled in its own directory (latex/) then the PDF is copied to notes/.
     """
     pdf_output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Compile in the latex/ directory
     cmd = ["pdflatex", "-interaction=nonstopmode",
            "-output-directory", str(tex_path.parent),
            str(tex_path)]
@@ -337,18 +343,17 @@ def compile_pdf(tex_path: Path, pdf_output_dir: Path, course_name: str, lecture_
         console.print("[dim]Install MiKTeX or TeX Live to auto-compile PDFs.[/dim]")
         return None
 
-    # Move/rename PDF to notes/ with descriptive name
     compiled_pdf = tex_path.with_suffix(".pdf")
     if not compiled_pdf.exists():
         console.print(f"[yellow]⚠ Compiled PDF not found at {compiled_pdf}[/yellow]")
         return None
 
-    pdf_filename = _make_pdf_filename(course_name, lecture_date)
+    pdf_filename = _make_pdf_filename(course_name, lecture_date, suffix)
     final_pdf = pdf_output_dir / pdf_filename
 
     import shutil
     shutil.copy2(compiled_pdf, final_pdf)
-    compiled_pdf.unlink()  # Remove from latex/ dir, keep only in notes/
+    compiled_pdf.unlink()
 
     console.print(f"[green]✓ PDF saved:[/green] {final_pdf}")
     return final_pdf
@@ -380,6 +385,7 @@ def generate_notes(
     transcript_path: Path = None,
     pdf_output_dir: Path = None,
     figures: list[dict] = None,
+    suffix: str = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     cfg = backend_config or {}
@@ -391,6 +397,8 @@ def generate_notes(
     console.print(f"Backend:   [yellow]{backend}[/yellow]")
     console.print(f"Course:    {course_name}")
     console.print(f"Date:      {lecture_date}")
+    if suffix:
+        console.print(f"Suffix:    {suffix}")
     if figures:
         console.print(f"Figures:   {len(figures)} to embed")
 
@@ -459,6 +467,6 @@ def generate_notes(
     console.print(f"[green]✓ LaTeX saved:[/green] {tex_path}")
 
     if compile_pdf_flag:
-        compile_pdf(tex_path, pdf_output_dir, course_name, lecture_date)
+        compile_pdf(tex_path, pdf_output_dir, course_name, lecture_date, suffix)
 
     return tex_path

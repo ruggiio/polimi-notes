@@ -118,6 +118,7 @@ def run(
     headless: bool = typer.Option(True, "--headless/--headed"),
     backend: str = typer.Option(None, "--backend"),
     no_cleanup: bool = typer.Option(False, "--no-cleanup", help="Skip automatic cleanup of previous run files"),
+    suffix: str = typer.Option(None, "--suffix", "-s", help="Optional suffix for the PDF filename (e.g. 'Part 1', 'Stability Analysis')"),
 ):
     """
     [bold green]Full pipeline:[/bold green] Download → Transcribe → OCR → LaTeX notes → PDF.
@@ -126,7 +127,8 @@ def run(
 
     console.print(Panel.fit(
         f"[bold]PoliMi Lecture Notes Pipeline[/bold]\n"
-        f"Course: [cyan]{course}[/cyan]  |  Date: [cyan]{lecture_date}[/cyan]",
+        f"Course: [cyan]{course}[/cyan]  |  Date: [cyan]{lecture_date}[/cyan]"
+        + (f"  |  Suffix: [cyan]{suffix}[/cyan]" if suffix else ""),
         border_style="blue"
     ))
 
@@ -303,6 +305,7 @@ def run(
             transcript_path=transcript_result["txt_path"],
             pdf_output_dir=pdf_output_dir,
             figures=figures if figures else None,
+            suffix=suffix,
         )
 
         # ── Step 5: Cleanup video (heavy file, no longer needed) ──────────────
