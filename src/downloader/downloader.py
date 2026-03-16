@@ -287,6 +287,12 @@ def download_lecture(
         # Extract date from page title
         recording_date = get_recording_date(page, webex_url)
 
+        # Save date to disk for reuse in subsequent --no-download runs
+        if recording_date:
+            date_file = output_dir / "lecture_date.txt"
+            date_file.write_text(recording_date)
+            console.print(f"[dim]Date saved to {date_file}[/dim]")
+
         console.print("[cyan]Waiting for video player to load...[/cyan]")
         for i in range(30):
             if found_url:
