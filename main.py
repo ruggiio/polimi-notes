@@ -1,325 +1,389 @@
+#!/usr/bin/env python3
 """
-downloader.py — Authenticated Webex lecture downloader for PoliMi SSO
+main.py — PoliMi Lecture Notes Pipeline CLI
+
+Usage examples:
+  python main.py run "https://..." --course "Analisi 2" --date "2024-03-15"
+  python main.py run URL --no-ocr
+  python main.py run URL --no-download --video my.mp4
+  python main.py run URL --no-download --no-transcribe --video my.mp4
+  python main.py transcribe-only my_lecture.mp4
+  python main.py notes-only transcript.txt --ocr ocr.json
 """
 
 import json
 import os
-import re
-import time
-import requests
+import shutil
 from pathlib import Path
+from datetime import date
 
-import yt_dlp
-from playwright.sync_api import sync_playwright, Page
+import typer
+import yaml
+from dotenv import load_dotenv
 from rich.console import Console
+from rich.panel import Panel
+from rich.rule import Rule
 
+load_dotenv()
+
+app = typer.Typer(
+    name="polimi-notes",
+    help="Download, transcribe, and convert PoliMi lectures to LaTeX notes.",
+    rich_markup_mode="rich",
+)
 console = Console()
 
-
-# ── Date Extraction ───────────────────────────────────────────────────────────
-
-def extract_date_from_title(title: str) -> str | None:
-    """
-    Extract date from Webex recording title.
-    Handles format: "Andrea Maria Zanchettin's Personal Room-20251008 0805-1"
-    Returns date in YYYY-MM-DD format, e.g. "2025-10-08"
-    """
-    match = re.search(r'(\d{4})(\d{2})(\d{2})', title)
-    if match:
-        year, month, day = match.group(1), match.group(2), match.group(3)
-        date_str = f"{year}-{month}-{day}"
-        console.print(f"[green]✓ Date extracted from title:[/green] {date_str} (from: '{title}')")
-        return date_str
-    console.print(f"[yellow]⚠ Could not extract date from title: '{title}'[/yellow]")
-    return None
+CONFIG_PATH = Path(__file__).parent / "config" / "config.yaml"
 
 
-def get_recording_date(page: Page, playback_url: str) -> str | None:
-    """Extract the recording date from the Webex playback page title."""
-    try:
-        title = page.title()
-        if title:
-            return extract_date_from_title(title)
-    except Exception as e:
-        console.print(f"[yellow]⚠ Could not read page title: {e}[/yellow]")
-    return None
-
-
-# ── SSO Login ────────────────────────────────────────────────────────────────
-
-def _do_polimi_sso(page: Page, email: str, codice: str, password: str) -> bool:
-    """
-    Two-step login:
-      1. Webex asks for EMAIL
-      2. PoliMi asks for CODICE PERSONA + PASSWORD
-    """
-    try:
-        page.wait_for_url(
-            re.compile(r"idbroker.*webex\.com|auth\.polimi\.it|login\.polimi|webex\.com/idb"),
-            timeout=15_000
-        )
-    except Exception:
-        if "recordingservice" in page.url or "playback" in page.url:
-            console.print("[green]✓ Already authenticated via saved session[/green]")
-            return True
-        raise RuntimeError(f"Unexpected URL: {page.url}")
-
-    # Step 1: Webex email page
-    if "idbroker" in page.url or "webex.com/idb" in page.url:
-        console.print(f"[yellow]→ Webex login (step 1/2): inserting email {email}...[/yellow]")
-        try:
-            page.wait_for_selector(
-                'input[type="email"], input[name="email"], input[placeholder*="mail"]',
-                timeout=8_000
-            )
-            email_field = page.query_selector(
-                'input[type="email"], input[name="email"], input[placeholder*="mail"]'
-            )
-            email_field.click()
-            email_field.fill(email)
-            email_field.press("Enter")
-        except Exception as e:
-            raise RuntimeError(f"Could not fill Webex email field: {e}")
-
-        try:
-            page.wait_for_url(
-                re.compile(r"auth\.polimi\.it|login\.polimi|sso\.polimi|aunicalogin"),
-                timeout=15_000
-            )
-            console.print("[green]✓ Email accepted, redirected to PoliMi SSO[/green]")
-        except Exception:
-            raise RuntimeError(f"Webex did not redirect to PoliMi. URL: {page.url}")
-
-    # Step 2: PoliMi credentials page
-    console.print(f"[yellow]→ PoliMi SSO (step 2/2): inserting Codice Persona {codice}...[/yellow]")
-    try:
-        codice_field = page.wait_for_selector(
-            'input[placeholder="Codice Persona"], input[name="j_username"], '
-            'input[id="j_username"], input[autocomplete="username"]',
-            timeout=8_000
-        )
-        codice_field.click()
-        time.sleep(0.2)
-        codice_field.fill(codice)
-        time.sleep(0.2)
-
-        pwd_field = page.wait_for_selector('input[type="password"]', timeout=5_000)
-        pwd_field.click()
-        time.sleep(0.2)
-        pwd_field.fill(password)
-        time.sleep(0.2)
-
-        accedi_btn = page.wait_for_selector(
-            'input[value="Accedi"], button:has-text("Accedi")',
-            timeout=5_000
-        )
-        accedi_btn.click()
-
-    except Exception as e:
-        raise RuntimeError(f"Could not fill PoliMi credentials: {e}")
-
-    # Step 2b: Handle "Continua" intermediate page
-    try:
-        page.wait_for_selector(
-            'button:has-text("Continua"), input[value="Continua"]',
-            timeout=8_000
-        )
-        console.print("[bold yellow]⚠ Clicca 'Continua' nel browser, poi premi INVIO qui[/bold yellow]")
-        input("  Premi INVIO dopo aver cliccato 'Continua'...")
-    except Exception:
-        pass
-
-    # Step 3: Wait for redirect back to Webex
-    try:
-        page.wait_for_url(re.compile(r"webex\.com"), timeout=45_000)
-        console.print("[green]✓ PoliMi SSO authentication successful[/green]")
-        return True
-    except Exception:
-        if "webex.com" in page.url:
-            console.print("[green]✓ Already on Webex[/green]")
-            return True
-        time.sleep(10)
-        if "webex.com" in page.url:
-            console.print("[green]✓ Redirected to Webex (delayed)[/green]")
-            return True
-        raise RuntimeError(f"Did not redirect back to Webex. URL: {page.url}")
-
-
-# ── Download ──────────────────────────────────────────────────────────────────
-
-def _download_with_ytdlp(url: str, output_path: Path, headers: dict, cookies: list[dict] = None) -> Path:
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    # Always remove existing file to force a fresh download
-    existing = output_path / "lecture.mp4"
-    if existing.exists():
-        existing.unlink()
-        console.print("[dim]Removed existing video for fresh download[/dim]")
-
-    cookie_file = None
-    if cookies:
-        cookie_file = output_path / "_cookies.txt"
-        lines = ["# Netscape HTTP Cookie File", ""]
-        for c in cookies:
-            domain = c.get("domain", "")
-            flag = "TRUE" if domain.startswith(".") else "FALSE"
-            secure = "TRUE" if c.get("secure") else "FALSE"
-            expires = int(c.get("expires", 0)) if c.get("expires") and c.get("expires") > 0 else 0
-            lines.append(
-                f"{domain}\t{flag}\t{c.get('path', '/')}\t{secure}\t{expires}"
-                f"\t{c.get('name', '')}\t{c.get('value', '')}"
-            )
-        cookie_file.write_text("\n".join(lines))
-
-    ydl_opts = {
-        "outtmpl": str(output_path / "lecture.%(ext)s"),
-        "format": "bestvideo+bestaudio/best",
-        "merge_output_format": "mp4",
-        "quiet": False,
-        "http_headers": headers,
-    }
-    if cookie_file:
-        ydl_opts["cookiefile"] = str(cookie_file)
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-
-    if cookie_file:
-        cookie_file.unlink(missing_ok=True)
-
-    out = Path(filename)
-    if not out.exists():
-        mp4 = output_path / "lecture.mp4"
-        if mp4.exists():
-            out = mp4
-    return out
-
-
-# ── Cookie helpers ────────────────────────────────────────────────────────────
-
-def _save_cookies(page: Page, path: Path):
-    cookies = page.context.cookies()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(cookies, f, indent=2)
-    console.print(f"[dim]Cookies saved to {path}[/dim]")
-
-
-def _load_cookies(context, path: Path) -> bool:
+def load_config(path: Path = CONFIG_PATH) -> dict:
     if not path.exists():
-        return False
+        console.print(f"[red]Config not found:[/red] {path}")
+        raise typer.Exit(1)
     with open(path) as f:
-        cookies = json.load(f)
-    context.add_cookies(cookies)
-    console.print(f"[dim]Loaded saved cookies from {path}[/dim]")
-    return True
+        return yaml.safe_load(f)
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+def get_credentials(cfg: dict) -> tuple[str, str]:
+    username = os.environ.get("POLIMI_USER") or cfg["auth"].get("username", "")
+    password = os.environ.get("POLIMI_PASS") or cfg["auth"].get("password", "")
+    if not username or not password:
+        username = username or typer.prompt("PoliMi username (Person Code)")
+        password = password or typer.prompt("PoliMi password", hide_input=True)
+    return username, password
 
-def download_lecture(
-    webex_url: str,
-    username: str,
-    password: str,
-    output_dir: Path,
-    cookies_file: Path,
-    headless: bool = True,
-) -> tuple[Path, str | None]:
+
+def _cleanup_before_run(cfg: dict, stem: str):
     """
-    Authenticate via PoliMi SSO, download the Webex recording,
-    and extract the recording date from the page title.
-
-    Returns:
-        (video_path, recording_date)
-        recording_date is in YYYY-MM-DD format, or None if not found
+    Clean up files from the previous run before starting a new one.
+    Keeps output/notes/ (final PDFs) and output/latex/figures/ untouched here
+    (figures are cleaned by figure_extractor at the start of figure extraction).
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
+    console.print("[dim]Cleaning up previous run files...[/dim]")
 
-    email = os.environ.get("POLIMI_EMAIL", username)
-    codice = username.split("@")[0]
+    # Remove OCR frames directory
+    frames_dir = Path(cfg["ocr"]["output_dir"]) / stem
+    if frames_dir.exists():
+        shutil.rmtree(frames_dir)
+        console.print(f"[dim]  Removed {frames_dir}[/dim]")
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=headless)
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            )
+    # Remove OCR json
+    ocr_json = Path(cfg["ocr"]["output_dir"]) / f"{stem}_ocr.json"
+    if ocr_json.exists():
+        ocr_json.unlink()
+        console.print(f"[dim]  Removed {ocr_json}[/dim]")
+
+    # Remove old transcript
+    transcript_txt = Path(cfg["transcription"]["output_dir"]) / f"{stem}.txt"
+    transcript_json = Path(cfg["transcription"]["output_dir"]) / f"{stem}_segments.json"
+    if transcript_txt.exists():
+        transcript_txt.unlink()
+        console.print(f"[dim]  Removed {transcript_txt}[/dim]")
+    if transcript_json.exists():
+        transcript_json.unlink()
+        console.print(f"[dim]  Removed {transcript_json}[/dim]")
+
+    # Remove old .tex (not figures — those are cleaned by figure_extractor)
+    tex_path = Path(cfg["notes"]["latex"]["output_dir"]) / "lecture_notes.tex"
+    if tex_path.exists():
+        tex_path.unlink()
+        console.print(f"[dim]  Removed {tex_path}[/dim]")
+
+    # Remove saved date (will be recreated on next download)
+    date_file = Path(cfg["download"]["output_dir"]) / "lecture_date.txt"
+    if date_file.exists():
+        date_file.unlink()
+        console.print(f"[dim]  Removed {date_file}[/dim]")
+
+
+def _cleanup_video(video_path: Path):
+    """Delete the video file after successful pipeline completion."""
+    if video_path and video_path.exists():
+        size_mb = video_path.stat().st_size / 1_000_000
+        video_path.unlink()
+        console.print(f"[dim]  Removed video ({size_mb:.0f} MB): {video_path}[/dim]")
+
+
+@app.command()
+def run(
+    webex_url: str = typer.Argument(..., help="Webex recording playback URL"),
+    course: str = typer.Option("Unknown Course", "--course", "-c"),
+    lecture_date: str = typer.Option(str(date.today()), "--date", "-d"),
+    config_path: Path = typer.Option(CONFIG_PATH, "--config"),
+    no_download: bool = typer.Option(False, "--no-download"),
+    video: Path = typer.Option(None, "--video"),
+    no_transcribe: bool = typer.Option(False, "--no-transcribe"),
+    no_ocr: bool = typer.Option(False, "--no-ocr"),
+    no_notes: bool = typer.Option(False, "--no-notes"),
+    headless: bool = typer.Option(True, "--headless/--headed"),
+    backend: str = typer.Option(None, "--backend"),
+    no_cleanup: bool = typer.Option(False, "--no-cleanup", help="Skip automatic cleanup of previous run files"),
+):
+    """
+    [bold green]Full pipeline:[/bold green] Download → Transcribe → OCR → LaTeX notes → PDF.
+    """
+    cfg = load_config(config_path)
+
+    console.print(Panel.fit(
+        f"[bold]PoliMi Lecture Notes Pipeline[/bold]\n"
+        f"Course: [cyan]{course}[/cyan]  |  Date: [cyan]{lecture_date}[/cyan]",
+        border_style="blue"
+    ))
+
+    # ── Step 0: Cleanup previous run ─────────────────────────────────────────
+    if not no_cleanup and not no_download:
+        # Only clean up if we're doing a fresh full run
+        _cleanup_before_run(cfg, "lecture")
+
+    # ── Step 1: Download ──────────────────────────────────────────────────────
+    if no_download:
+        if not video or not video.exists():
+            console.print("[red]--no-download requires --video <path>[/red]")
+            raise typer.Exit(1)
+        video_path = video
+        console.print(f"[dim]Using existing video: {video_path}[/dim]")
+
+        # Try to restore the date saved during the original download
+        date_file = Path(cfg["download"]["output_dir"]) / "lecture_date.txt"
+        if date_file.exists() and lecture_date == str(date.today()):
+            lecture_date = date_file.read_text().strip()
+            console.print(f"[green]✓ Using saved date:[/green] {lecture_date}")
+    else:
+        from src.downloader.downloader import download_lecture
+        username, password = get_credentials(cfg)
+        console.print(Rule("[bold]Step 1/4: Download[/bold]"))
+        video_path, extracted_date = download_lecture(
+            webex_url=webex_url,
+            username=username,
+            password=password,
+            output_dir=Path(cfg["download"]["output_dir"]),
+            cookies_file=Path(cfg["download"]["cookies_file"]),
+            headless=headless,
+        )
+        if extracted_date and lecture_date == str(date.today()):
+            lecture_date = extracted_date
+            console.print(f"[green]✓ Using extracted date:[/green] {lecture_date}")
+
+    stem = video_path.stem
+
+    # ── Step 2: Transcribe ────────────────────────────────────────────────────
+    if no_transcribe:
+        transcript_txt = Path(cfg["transcription"]["output_dir"]) / f"{stem}.txt"
+        transcript_json = Path(cfg["transcription"]["output_dir"]) / f"{stem}_segments.json"
+
+        if not transcript_txt.exists():
+            console.print(f"[red]Transcript not found:[/red] {transcript_txt}")
+            console.print("[yellow]Run without --no-transcribe to generate it first.[/yellow]")
+            raise typer.Exit(1)
+
+        console.print(Rule("[bold]Step 2/4: Transcription[/bold]"))
+        console.print(f"[dim]Using existing transcript: {transcript_txt}[/dim]")
+
+        text = transcript_txt.read_text(encoding="utf-8")
+        segments = []
+        if transcript_json.exists():
+            with open(transcript_json) as f:
+                data = json.load(f)
+                segments = data.get("segments", [])
+                lang = data.get("language", "unknown")
+            console.print(f"[dim]Loaded {len(segments)} segments, language: {lang}[/dim]")
+        else:
+            segments = [{"id": 0, "start": 0, "end": 9999, "text": text}]
+
+        transcript_result = {
+            "text": text,
+            "segments": segments,
+            "language": "unknown",
+            "txt_path": transcript_txt,
+            "json_path": transcript_json,
+        }
+    else:
+        from src.transcriber.transcriber import transcribe, get_device
+        console.print(Rule("[bold]Step 2/4: Transcription[/bold]"))
+        tcfg = cfg["transcription"]
+        device = get_device() if tcfg["device"] == "cuda" else "cpu"
+        transcript_result = transcribe(
+            video_path=video_path,
+            output_dir=Path(tcfg["output_dir"]),
+            model_name=tcfg["model"],
+            language=tcfg.get("language"),
+            device=device,
         )
 
-        already_authed = _load_cookies(context, cookies_file)
+    # ── Step 3: OCR ───────────────────────────────────────────────────────────
+    merged_data = []
+    frames = []
 
-        found_url = None
-        found_headers = {}
+    if not no_ocr:
+        from src.ocr.ocr import extract_frames, run_ocr, align_ocr_with_transcript, save_ocr_results
+        console.print(Rule("[bold]Step 3/4: OCR Analysis[/bold]"))
 
-        def on_request(request):
-            nonlocal found_url, found_headers
-            url = request.url
-            if any(kw in url.lower() for kw in ["record", "media", "stream", "video", "content", "play", "wbx", "nln"]):
-                console.print(f"[dim]Request: {url[:120]}[/dim]")
-            is_video = (
-                any(ext in url for ext in [".mp4", ".m3u8", ".ts"]) or
-                any(kw in url.lower() for kw in ["nln1.wbx.com", "ciscospark", "recording/play", "streamurl"])
-            )
-            if is_video and found_url is None:
-                found_url = url
-                found_headers = dict(request.headers)
-                console.print(f"[green]✓ Video URL intercepted:[/green] {url[:120]}...")
-
-        page = context.new_page()
-        page.on("request", on_request)
-
-        console.print(f"[cyan]Navigating to:[/cyan] {webex_url}")
-        page.goto(webex_url, wait_until="domcontentloaded", timeout=30_000)
-
-        needs_login = (
-            not already_authed
-            or "idbroker" in page.url
-            or "auth.polimi" in page.url
-            or "aunicalogin" in page.url
+        ocrcfg = cfg["ocr"]
+        frames = extract_frames(
+            video_path=video_path,
+            output_dir=Path(ocrcfg["output_dir"]) / stem,
+            interval_sec=ocrcfg["frame_interval_sec"],
+            scene_threshold=ocrcfg["scene_change_threshold"],
         )
-        if needs_login:
-            _do_polimi_sso(page, email=email, codice=codice, password=password)
-            _save_cookies(page, cookies_file)
+        ocr_results = run_ocr(
+            frames=frames,
+            languages=ocrcfg["languages"],
+            gpu=ocrcfg["gpu"],
+        )
+        save_ocr_results(ocr_results, Path(ocrcfg["output_dir"]), stem)
+        merged_data = align_ocr_with_transcript(ocr_results, transcript_result["segments"])
 
-        # Extract date from page title
-        recording_date = get_recording_date(page, webex_url)
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                console.print("[dim]GPU memory freed after OCR[/dim]")
+        except Exception:
+            pass
+    else:
+        console.print("[dim]OCR skipped (--no-ocr)[/dim]")
+        merged_data = [
+            {"timestamp_sec": s["start"], "speech": s["text"], "ocr_text": "", "is_slide": False}
+            for s in transcript_result["segments"]
+        ]
+        ocr_json_path = Path(cfg["ocr"]["output_dir"]) / f"{stem}_ocr.json"
+        if ocr_json_path.exists():
+            try:
+                with open(ocr_json_path) as f:
+                    ocr_raw = json.load(f)
+                frames = [
+                    (r["timestamp_sec"], Path(r["image_path"]))
+                    for r in ocr_raw
+                    if Path(r["image_path"]).exists()
+                ]
+                if frames:
+                    console.print(f"[dim]Loaded {len(frames)} frames from saved OCR json[/dim]")
+            except Exception:
+                pass
 
-        # Save date to disk for reuse in subsequent --no-download runs
-        if recording_date:
-            date_file = output_dir / "lecture_date.txt"
-            date_file.write_text(recording_date)
-            console.print(f"[dim]Date saved to {date_file}[/dim]")
+    # ── Step 3.5: Figure Extraction (optional) ──────────────────────────────
+    figures = []
+    figures_enabled = cfg.get("figures", {}).get("enabled", False)
+    if figures_enabled and not no_notes and frames:
+        from src.ocr.figure_extractor import extract_figures
+        console.print(Rule("[bold]Step 3.5/4: Figure Extraction[/bold]"))
+        figures_dir = Path(cfg["notes"]["latex"]["output_dir"]) / "figures"
+        figures = extract_figures(
+            frames=frames,
+            merged_data=merged_data,
+            figures_output_dir=figures_dir,
+            api_key=cfg.get("figures", {}).get("api_key", ""),
+            model=cfg.get("figures", {}).get("model", "claude-sonnet-4-20250514"),
+            max_candidates=cfg.get("figures", {}).get("max_candidates", 30),
+        )
+        console.print(f"[dim]Figures selected: {len(figures)}[/dim]")
+    elif figures_enabled and not frames:
+        console.print("[yellow]⚠ Figure extraction enabled but no frames available[/yellow]")
 
-        console.print("[cyan]Waiting for video player to load...[/cyan]")
-        for i in range(30):
-            if found_url:
-                break
-            time.sleep(1)
-            if i == 3:
-                try:
-                    play_btn = page.query_selector(
-                        'button[aria-label*="play" i], button[title*="play" i], '
-                        '.play-button, #play-btn, [class*="play"]'
-                    )
-                    if play_btn:
-                        play_btn.click()
-                        console.print("[dim]Clicked play button[/dim]")
-                except Exception:
-                    pass
+    # ── Step 4: Notes Generation ──────────────────────────────────────────────
+    if not no_notes:
+        from src.notes_gen.notes_gen import generate_notes
+        console.print(Rule("[bold]Step 4/4: LaTeX Notes Generation[/bold]"))
 
-        if not found_url:
-            console.print("[bold yellow]⚠ Video URL not found automatically.[/bold yellow]")
-            console.print("[yellow]Please click play in the browser, then press INVIO here...[/yellow]")
-            input("  Premi INVIO dopo aver avviato il video...")
-            time.sleep(5)
+        ncfg = cfg["notes"]
+        active_backend = backend or ncfg["backend"]
+        backend_config = ncfg.get(active_backend, {})
+        backend_config["math_only_ocr"] = cfg.get("ocr", {}).get("math_only_filter", True)
+        pdf_output_dir = Path(ncfg["latex"].get("pdf_output_dir", "output/notes"))
 
-        cookies = context.cookies()
-        browser.close()
+        tex_path = generate_notes(
+            merged_data=merged_data,
+            output_dir=Path(ncfg["latex"]["output_dir"]),
+            stem=stem,
+            course_name=course,
+            lecture_date=lecture_date,
+            backend=active_backend,
+            backend_config=backend_config,
+            compile_pdf_flag=ncfg["latex"]["compile_pdf"],
+            transcript_path=transcript_result["txt_path"],
+            pdf_output_dir=pdf_output_dir,
+            figures=figures if figures else None,
+        )
 
-    if not found_url:
-        raise RuntimeError("Could not intercept video stream URL.")
+        # ── Step 5: Cleanup video (heavy file, no longer needed) ──────────────
+        if not no_download and not no_cleanup:
+            console.print(Rule("[bold]Step 5/4: Cleanup[/bold]"))
+            _cleanup_video(video_path)
+            console.print("[dim]OCR frames kept for potential rerun[/dim]")
 
-    return _download_with_ytdlp(found_url, output_dir, found_headers, cookies), recording_date
+        console.print(Panel.fit(
+            f"[bold green]✓ Pipeline complete![/bold green]\n\n"
+            f"  Transcript: {transcript_result['txt_path']}\n"
+            f"  Notes .tex: {tex_path}\n"
+            f"  Notes .pdf: {pdf_output_dir}/",
+            border_style="green"
+        ))
+    else:
+        console.print("[dim]Notes generation skipped (--no-notes)[/dim]")
+
+
+@app.command()
+def transcribe_only(
+    video: Path = typer.Argument(..., help="Path to video file"),
+    model: str = typer.Option("medium", "--model", "-m"),
+    language: str = typer.Option(None, "--language", "-l"),
+    config_path: Path = typer.Option(CONFIG_PATH, "--config"),
+):
+    """Transcribe a single video file (no download or notes)."""
+    cfg = load_config(config_path)
+    from src.transcriber.transcriber import transcribe, get_device
+    device = get_device()
+    transcribe(
+        video_path=video,
+        output_dir=Path(cfg["transcription"]["output_dir"]),
+        model_name=model,
+        language=language,
+        device=device,
+    )
+
+
+@app.command()
+def notes_only(
+    transcript: Path = typer.Argument(..., help="Path to .txt transcript file"),
+    ocr_json: Path = typer.Option(None, "--ocr", help="Path to OCR JSON file"),
+    course: str = typer.Option("Unknown Course", "--course", "-c"),
+    lecture_date: str = typer.Option(str(date.today()), "--date", "-d"),
+    backend: str = typer.Option("claude", "--backend", "-b"),
+    config_path: Path = typer.Option(CONFIG_PATH, "--config"),
+):
+    """Generate LaTeX notes from an existing transcript (and optional OCR)."""
+    from src.notes_gen.notes_gen import generate_notes
+    from src.ocr.ocr import FrameOCRResult, align_ocr_with_transcript
+
+    cfg = load_config(config_path)
+    text = transcript.read_text(encoding="utf-8")
+    segments = [{"id": 0, "start": 0, "end": 9999, "text": text}]
+
+    if ocr_json and ocr_json.exists():
+        with open(ocr_json) as f:
+            ocr_raw = json.load(f)
+        ocr_results = [FrameOCRResult(**r) for r in ocr_raw]
+        merged_data = align_ocr_with_transcript(ocr_results, segments)
+    else:
+        merged_data = [{"timestamp_sec": 0, "speech": text, "ocr_text": "", "is_slide": False}]
+
+    ncfg = cfg["notes"]
+    active_backend = backend or ncfg["backend"]
+    pdf_output_dir = Path(ncfg["latex"].get("pdf_output_dir", "output/notes"))
+
+    generate_notes(
+        merged_data=merged_data,
+        output_dir=Path(ncfg["latex"]["output_dir"]),
+        stem=transcript.stem,
+        course_name=course,
+        lecture_date=lecture_date,
+        backend=active_backend,
+        backend_config=ncfg.get(active_backend, {}),
+        compile_pdf_flag=ncfg["latex"]["compile_pdf"],
+        transcript_path=transcript,
+        pdf_output_dir=pdf_output_dir,
+    )
+
+
+if __name__ == "__main__":
+    app()
