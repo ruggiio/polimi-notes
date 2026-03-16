@@ -1,0 +1,32 @@
+cd C:\Users\ricky\Desktop\polimi-notes
+notepad .gitignore
+```
+
+Incolla questo contenuto e salva:
+```
+# Personal credentials
+.env
+config/webex_cookies.json
+
+# Output files (personal content)
+output/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# LaTeX auxiliary files
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,57 @@
+# ============================================================
+#  PoliMi Lecture Notes Pipeline — Configuration
+# ============================================================
+
+auth:
+  username: ""          # Your PoliMi Person Code (e.g. 10XXXXXX)
+  password: ""          # Or use env vars: POLIMI_USER / POLIMI_PASS
+
+download:
+  output_dir: "output/videos"
+  cookies_file: "config/webex_cookies.json"
+  quality: "best"
+
+transcription:
+  model: "medium"        # faster-whisper model
+  language: null         # null = auto-detect
+  device: "cuda"
+  output_dir: "output/transcripts"
+
+ocr:
+  enabled: true
+  frame_interval_sec: 10
+  scene_change_threshold: 0.15
+  output_dir: "output/frames"
+  languages: ["it", "en"]
+  gpu: true
+  math_only_filter: false   # true  = keep only formulas/symbols from slides (cheaper)
+                             # false = keep ALL slide text not in transcript (recommended)
+
+notes:
+  backend: "claude"
+
+  claude:
+    model: "claude-sonnet-4-20250514"
+    api_key: ""          # Or set env var ANTHROPIC_API_KEY
+    max_tokens: 32000
+
+  ollama:
+    model: "mistral"
+    host: "http://localhost:11434"
+
+  openai:
+    model: "gpt-4o"
+    api_key: ""
+
+  latex:
+    output_dir: "output/latex"      # .tex always overwritten here
+    pdf_output_dir: "output/notes"  # PDFs saved here with date+course name
+    compile_pdf: true
+    template: "default"
+
+figures:
+  enabled: true           # Set to true to enable Claude Vision figure extraction
+  model: "claude-sonnet-4-20250514"
+  api_key: ""              # Uses ANTHROPIC_API_KEY env var if empty
+  max_candidates: 30       # Max frames to analyze with Vision API (cost control)
+  complexity_threshold: 0.05  # Min visual complexity score to be a candidate

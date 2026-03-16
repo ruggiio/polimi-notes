@@ -1,0 +1,29 @@
+# Core
+pyyaml>=6.0
+typer[all]>=0.12
+rich>=13.0
+python-dotenv>=1.0
+
+# Download & Browser automation
+playwright>=1.44
+yt-dlp>=2024.1.1
+requests>=2.31
+
+# Transcription
+openai-whisper>=20231117
+torch>=2.1.0          # Install CUDA version separately — see README
+numpy>=1.24
+
+# OCR
+easyocr>=1.7
+opencv-python>=4.8
+Pillow>=10.0
+ffmpeg-python>=0.2.0
+
+# LLM / Notes generation
+anthropic>=0.28        # Claude API
+ollama>=0.2            # Ollama local client
+openai>=1.30           # OpenAI API (optional)
+
+# LaTeX utilities
+pylatex>=1.4           # For template generation helpers
