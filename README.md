@@ -28,7 +28,7 @@ Webex URL → [Playwright SSO] → .mp4 → [faster-whisper] → transcript
 ### 1. Clone the repository
 
 ```bat
-git clone https://github.com/ruggiio/polimi-notes.git
+
 cd polimi-notes
 ```
 

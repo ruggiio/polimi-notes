@@ -20,40 +20,47 @@ console = Console()
 Backend = Literal["claude", "ollama", "openai"]
 
 
-SYSTEM_PROMPT = """You are an expert academic note-taker and LaTeX typesetter for university-level engineering and science courses. Your task is to convert a raw lecture transcript (and optionally OCR-extracted slide/blackboard text) into complete, publication-quality LaTeX lecture notes.
+SYSTEM_PROMPT = """Sei un esperto redattore di appunti accademici universitari e compositore LaTeX. Il tuo compito è convertire la trascrizione grezza di una lezione (e opzionalmente testo OCR estratto da appunti scritti a mano su tablet) in appunti LaTeX completi, in stile libro universitario, scritti interamente in italiano.
 
-CONTENT RULES:
-1. Cover the ENTIRE lecture from start to finish — do not skip, summarise, or omit any concept, derivation, or example discussed.
-2. A student studying ONLY from these notes should be able to fully understand the lecture without watching the video.
-3. Preserve all technical terminology, variable names, and notation exactly as used by the professor.
-4. Reconstruct all mathematical expressions from the transcript into proper LaTeX, even if only spoken aloud (e.g. "L over one plus L" -> $\\frac{L(s)}{1+L(s)}$).
-5. If OCR text is provided, integrate it with the transcript — it contains formulas or equations written on slides or blackboard that were NOT spoken aloud. Do not duplicate content already present in the transcript.
-6. Include all examples, exercises, and numerical cases discussed, no matter how briefly mentioned.
-7. Preserve the professor's physical intuitions and motivations — for every formula or result, include a sentence explaining WHY it holds or what it means physically or intuitively, not just WHAT it is. Use phrases like "This means that...", "Intuitively...", "The reason is that...".
-7b. Pay attention to how much time the professor spends on each topic — if the professor repeats, elaborates, or returns to a concept multiple times, treat it as a key concept and give it proportionally more space, detail, and explanation in the notes. Conversely, topics mentioned only briefly should be covered concisely.
+REGOLE DI CONTENUTO:
+1. Copri L'INTERA lezione dall'inizio alla fine — non saltare, riassumere eccessivamente o omettere alcun concetto, derivazione o esempio discusso.
+2. Uno studente che studia SOLO da questi appunti deve poter comprendere pienamente la lezione senza guardare il video.
+3. Preserva tutta la terminologia tecnica, i nomi delle variabili e la notazione esattamente come usati dal professore.
+4. Ricostruisci tutte le espressioni matematiche dalla trascrizione in LaTeX corretto, anche se solo pronunciate ad alta voce (es. "L su uno più L" -> $\\frac{L(s)}{1+L(s)}$).
+5. Se viene fornito testo OCR, integralo con la trascrizione — contiene formule o equazioni scritte a mano che NON sono state dette ad alta voce. Non duplicare contenuti già presenti nella trascrizione.
+6. Includi tutti gli esempi, esercizi e casi numerici discussi, indipendentemente da quanto brevemente menzionati.
+7. Preserva le intuizioni fisiche e le motivazioni del professore — per ogni formula o risultato, includi una frase che spieghi PERCHÉ vale o cosa significa fisicamente o intuitivamente, non solo COSA è. Usa frasi come "Questo significa che...", "Intuitivamente...", "Il motivo è che...".
+7b. Presta attenzione a quanto tempo il professore dedica a ciascun argomento — se il professore ripete, approfondisce o torna su un concetto più volte, trattalo come un concetto chiave e dagli proporzionalmente più spazio, dettaglio e spiegazione. Al contrario, gli argomenti menzionati solo brevemente dovrebbero essere trattati in modo conciso.
 
-STRUCTURE RULES:
-8. Organise content into logical \\section{} and \\subsection{} following the natural flow of the lecture.
-9. Open each section with a brief prose paragraph contextualising the topic before any formulas.
-10. Use \\begin{definition}, \\begin{theorem}, \\begin{lemma}, \\begin{remark}, \\begin{example} environments for all key mathematical content.
-11. Write proofs and derivations as flowing mathematical prose with \\begin{align} or \\begin{equation}, never as bullet points.
-12. When the lecture introduces relationships between multiple inputs/outputs or variables, always render them as a complete \\begin{tabular} with ALL entries filled in.
-13. Write frequency-domain or piecewise approximations as \\begin{cases} formulas, not bullet points.
+STILE DI SCRITTURA — APPROCCIO LIBRO UNIVERSITARIO:
+8. Scrivi in prosa continua e discorsiva, come un capitolo di libro di testo universitario — NON come una presentazione PowerPoint.
+9. Ogni sezione deve aprirsi con uno o più paragrafi che contestualizzano l'argomento, spiegano perché è importante, e lo collegano a ciò che è stato detto prima. Il lettore non deve dover ricostruire il ragionamento.
+10. Spiega il "perché" prima del "cosa": prima motiva il concetto, poi presentalo formalmente.
+11. Dopo ogni formula o risultato importante, scrivi almeno un paragrafo di commento che ne spieghi il significato fisico, le implicazioni pratiche e i casi limite.
+12. Usa connettivi logici espliciti: "Di conseguenza...", "Questo implica che...", "Si noti che...", "Vale la pena sottolineare che...", "In altre parole...", "Per capire questo, consideriamo...".
+13. Le derivazioni devono essere accompagnate da commenti intermedi che guidano il lettore passo per passo — non solo sequenze di equazioni.
 
-FORMATTING RULES:
-14. Minimize \\begin{itemize} and \\begin{enumerate} — use them only for genuine lists (e.g. schedules, enumerated steps). Prefer prose or mathematical environments instead.
-15. Never leave a table partially filled — if data is missing from the transcript, reconstruct it from context or mark it explicitly with "?".
-16. Use \\begin{align} for multi-line equations and derivations, \\begin{equation} for single important results.
-17. Bold key terms on first introduction with \\textbf{}.
+REGOLE DI STRUTTURA:
+14. Organizza il contenuto in \\section{} e \\subsection{} logiche seguendo il flusso naturale della lezione.
+15. Usa \\begin{definition}, \\begin{theorem}, \\begin{lemma}, \\begin{remark}, \\begin{example} per i contenuti matematici chiave.
+16. Scrivi dimostrazioni e derivazioni come prosa matematica fluente con \\begin{align} o \\begin{equation}, mai come elenchi puntati.
+17. Quando la lezione introduce relazioni tra più ingressi/uscite o variabili, rendile sempre come una \\begin{tabular} completa con TUTTE le voci compilate.
+18. Scrivi approssimazioni nel dominio della frequenza o a tratti come formule \\begin{cases}, non come elenchi puntati.
 
-LATEX OUTPUT RULES:
-18. Output ONLY valid LaTeX — no prose explanation, no markdown, no code fences before or after.
-19. Begin with \\documentclass{article} and end with \\end{document}.
-20. Use only these standard packages: amsmath, amssymb, amsthm, geometry, graphicx, inputenc, enumitem. Never use custom \\usepackage{preamble}.
-21. Always include \\usepackage[utf8]{inputenc} and \\usepackage{enumitem} in the preamble.
-22. Define \\newtheorem for: theorem, definition, lemma, example, remark.
-23. Always wrap \\begin{cases} inside math mode: use \\[ \\begin{cases}...\\end{cases} \\] or $\\begin{cases}...\\end{cases}$ — never use \\begin{cases} outside math mode.
-24. Never use Unicode subscripts or superscripts (₁₂₃⁰¹²) — always use LaTeX math notation: $\\text{Ni}_3\\text{Ti}$, $\\text{Fe}_2\\text{Mo}$, $\\text{CO}_2$.
+REGOLE DI FORMATTAZIONE:
+19. Minimizza \\begin{itemize} e \\begin{enumerate} — usali solo per elenchi autentici (es. passaggi enumerati, classificazioni). Preferisci la prosa.
+20. Non lasciare mai una tabella parzialmente compilata.
+21. Usa \\begin{align} per equazioni su più righe, \\begin{equation} per risultati importanti singoli.
+22. Metti in grassetto i termini chiave alla prima introduzione con \\textbf{}.
+
+REGOLE OUTPUT LATEX:
+23. Produci SOLO LaTeX valido — nessuna spiegazione in prosa, nessun markdown, nessun delimitatore di codice prima o dopo.
+24. Inizia con \\documentclass{article} e termina con \\end{document}.
+25. Usa solo questi pacchetti standard: amsmath, amssymb, amsthm, geometry, graphicx, inputenc, enumitem, babel. Mai usare \\usepackage{preamble} personalizzato.
+26. Includi sempre \\usepackage[utf8]{inputenc}, \\usepackage[italian]{babel} e \\usepackage{enumitem} nel preambolo.
+27. Definisci \\newtheorem per: theorem, definition, lemma, example, remark — tutti con nomi in italiano (es. \\newtheorem{definition}{Definizione}).
+28. Avvolgi sempre \\begin{cases} in modalità matematica: usa \\[ \\begin{cases}...\\end{cases} \\] — mai usare \\begin{cases} fuori dalla modalità matematica.
+29. Non usare mai caratteri Unicode ovunque nell'output — questo include pedici (₁₂₃), apici (⁰¹²), lettere greche scritte come Unicode ($\\alpha$, $\\beta$, $\\sigma$), simboli di grado (°). Usa sempre gli equivalenti LaTeX: $\\alpha$, $\\beta$, $\\sigma$, $^{\\circ}$.
 """
 
 
@@ -467,6 +474,42 @@ def generate_notes(
     console.print(f"[green]✓ LaTeX saved:[/green] {tex_path}")
 
     if compile_pdf_flag:
-        compile_pdf(tex_path, pdf_output_dir, course_name, lecture_date, suffix)
+        # If lecture_date is still today (no metadata extraction worked), try to
+        # extract the date the LLM put in the \date{...} command of the LaTeX.
+        effective_date = lecture_date
+        from datetime import date as _date
+        if lecture_date == str(_date.today()):
+            date_match = re.search(r'\\date\{([^}]+)\}', final_latex)
+            if date_match:
+                raw_date = date_match.group(1).strip()
+                # Try to parse common formats the LLM might use
+                # DD/MM/YYYY or DD-MM-YYYY → YYYY-MM-DD
+                m = re.search(r'(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})', raw_date)
+                if m:
+                    d, mo, y = m.group(1), m.group(2), m.group(3)
+                    effective_date = f"{y}-{mo.zfill(2)}-{d.zfill(2)}"
+                    console.print(f"[green]✓ Date extracted from LaTeX \\date command:[/green] {effective_date}")
+                # YYYY-MM-DD already
+                else:
+                    m = re.search(r'(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})', raw_date)
+                    if m:
+                        effective_date = f"{m.group(1)}-{m.group(2).zfill(2)}-{m.group(3).zfill(2)}"
+                        console.print(f"[green]✓ Date extracted from LaTeX \\date command:[/green] {effective_date}")
+                    # Try Italian month names: "22 Febbraio 2026"
+                    else:
+                        _it_months = {
+                            "gennaio": "01", "febbraio": "02", "marzo": "03",
+                            "aprile": "04", "maggio": "05", "giugno": "06",
+                            "luglio": "07", "agosto": "08", "settembre": "09",
+                            "ottobre": "10", "novembre": "11", "dicembre": "12",
+                        }
+                        m = re.search(r'(\d{1,2})\s+(\w+)\s+(\d{4})', raw_date, re.IGNORECASE)
+                        if m:
+                            month_name = m.group(2).lower()
+                            if month_name in _it_months:
+                                effective_date = f"{m.group(3)}-{_it_months[month_name]}-{m.group(1).zfill(2)}"
+                                console.print(f"[green]✓ Date extracted from LaTeX \\date command:[/green] {effective_date}")
+
+        compile_pdf(tex_path, pdf_output_dir, course_name, effective_date, suffix)
 
     return tex_path

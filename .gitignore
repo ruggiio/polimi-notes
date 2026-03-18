@@ -7,6 +7,7 @@ Incolla questo contenuto e salva:
 # Personal credentials
 .env
 config/webex_cookies.json
+config/ms_cookies.json
 
 # Output files (personal content)
 output/

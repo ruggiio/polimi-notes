@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py — PoliMi Lecture Notes Pipeline CLI
+main.py — UniPR Lecture Notes Pipeline CLI
 
 Usage examples:
   python main.py run "https://..." --course "Analisi 2" --date "2024-03-15"
@@ -45,11 +45,11 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
 
 
 def get_credentials(cfg: dict) -> tuple[str, str]:
-    username = os.environ.get("POLIMI_USER") or cfg["auth"].get("username", "")
-    password = os.environ.get("POLIMI_PASS") or cfg["auth"].get("password", "")
+    username = os.environ.get("MICROSOFT_EMAIL") or cfg["auth"].get("username", "")
+    password = os.environ.get("MICROSOFT_PASS") or cfg["auth"].get("password", "")
     if not username or not password:
-        username = username or typer.prompt("PoliMi username (Person Code)")
-        password = password or typer.prompt("PoliMi password", hide_input=True)
+        username = username or typer.prompt("UniPR Microsoft email")
+        password = password or typer.prompt("Microsoft password", hide_input=True)
     return username, password
 
 
@@ -106,7 +106,7 @@ def _cleanup_video(video_path: Path):
 
 @app.command()
 def run(
-    webex_url: str = typer.Argument(..., help="Webex recording playback URL"),
+    sharepoint_url: str = typer.Argument(..., help="SharePoint video URL"),
     course: str = typer.Option("Unknown Course", "--course", "-c"),
     lecture_date: str = typer.Option(str(date.today()), "--date", "-d"),
     config_path: Path = typer.Option(CONFIG_PATH, "--config"),
@@ -126,7 +126,7 @@ def run(
     cfg = load_config(config_path)
 
     console.print(Panel.fit(
-        f"[bold]PoliMi Lecture Notes Pipeline[/bold]\n"
+        f"[bold]UniPR Lecture Notes Pipeline[/bold]\n"
         f"Course: [cyan]{course}[/cyan]  |  Date: [cyan]{lecture_date}[/cyan]"
         + (f"  |  Suffix: [cyan]{suffix}[/cyan]" if suffix else ""),
         border_style="blue"
@@ -155,7 +155,7 @@ def run(
         username, password = get_credentials(cfg)
         console.print(Rule("[bold]Step 1/4: Download[/bold]"))
         video_path, extracted_date = download_lecture(
-            webex_url=webex_url,
+            sharepoint_url=sharepoint_url,
             username=username,
             password=password,
             output_dir=Path(cfg["download"]["output_dir"]),
@@ -165,6 +165,12 @@ def run(
         if extracted_date and lecture_date == str(date.today()):
             lecture_date = extracted_date
             console.print(f"[green]✓ Using extracted date:[/green] {lecture_date}")
+        elif lecture_date == str(date.today()):
+            console.print(
+                "[yellow]⚠ Could not extract recording date from metadata.[/yellow]\n"
+                "[yellow]  The PDF will use today's date. To set the correct date, re-run with:[/yellow]\n"
+                f"[yellow]  --date YYYY-MM-DD  (e.g. --date 2026-03-05)[/yellow]"
+            )
 
     stem = video_path.stem
 
@@ -226,6 +232,7 @@ def run(
             output_dir=Path(ocrcfg["output_dir"]) / stem,
             interval_sec=ocrcfg["frame_interval_sec"],
             scene_threshold=ocrcfg["scene_change_threshold"],
+            max_force_interval_sec=ocrcfg.get("max_force_interval_sec", 45.0),
         )
         ocr_results = run_ocr(
             frames=frames,
@@ -276,7 +283,8 @@ def run(
             figures_output_dir=figures_dir,
             api_key=cfg.get("figures", {}).get("api_key", ""),
             model=cfg.get("figures", {}).get("model", "claude-sonnet-4-20250514"),
-            max_candidates=cfg.get("figures", {}).get("max_candidates", 30),
+            max_candidates=cfg.get("figures", {}).get("max_candidates", 50),
+            complexity_threshold=cfg.get("figures", {}).get("complexity_threshold", 0.05),
         )
         console.print(f"[dim]Figures selected: {len(figures)}[/dim]")
     elif figures_enabled and not frames:

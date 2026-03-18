@@ -1,57 +1,48 @@
-# ============================================================
-#  PoliMi Lecture Notes Pipeline — Configuration
-# ============================================================
+# ele-notes — SharePoint/OneDrive lecture notes pipeline
+# University of Parma (UniPR) — Microsoft SSO
 
 auth:
-  username: ""          # Your PoliMi Person Code (e.g. 10XXXXXX)
-  password: ""          # Or use env vars: POLIMI_USER / POLIMI_PASS
+  username: ""    # Leave empty — use .env: MICROSOFT_EMAIL
+  password: ""    # Leave empty — use .env: MICROSOFT_PASS
 
 download:
   output_dir: "output/videos"
-  cookies_file: "config/webex_cookies.json"
-  quality: "best"
+  cookies_file: "config/ms_cookies.json"   # Microsoft session cookies
 
 transcription:
-  model: "medium"        # faster-whisper model
-  language: null         # null = auto-detect
-  device: "cuda"
   output_dir: "output/transcripts"
+  model: "medium"        # faster-whisper model
+  device: "cuda"         # cuda or cpu
+  language: null         # null = auto-detect (works for Italian)
 
 ocr:
   enabled: true
-  frame_interval_sec: 10
-  scene_change_threshold: 0.15
+  frame_interval_sec: 15       # step size for scene-change sampling
+  scene_change_threshold: 0.25 # histogram distance threshold (lower = more sensitive)
+  max_force_interval_sec: 45   # always capture a frame at least every N seconds
   output_dir: "output/frames"
   languages: ["it", "en"]
   gpu: true
-  math_only_filter: false   # true  = keep only formulas/symbols from slides (cheaper)
-                             # false = keep ALL slide text not in transcript (recommended)
+  math_only_filter: false      # false = all text (handwriting has more mixed content)
+
+figures:
+  enabled: true
+  model: "claude-sonnet-4-20250514"
+  api_key: ""              # Uses ANTHROPIC_API_KEY env var if empty
+  max_candidates: 150      # Show all frames to Vision for typical lecture lengths
+  complexity_threshold: 0.05   # Very low — catch even simple diagrams
 
 notes:
   backend: "claude"
-
   claude:
     model: "claude-sonnet-4-20250514"
-    api_key: ""          # Or set env var ANTHROPIC_API_KEY
     max_tokens: 32000
-
-  ollama:
-    model: "mistral"
-    host: "http://localhost:11434"
-
-  openai:
-    model: "gpt-4o"
-    api_key: ""
-
   latex:
-    output_dir: "output/latex"      # .tex always overwritten here
-    pdf_output_dir: "output/notes"  # PDFs saved here with date+course name
+    output_dir: "output/latex"
+    pdf_output_dir: "output/notes"
     compile_pdf: true
     template: "default"
 
-figures:
-  enabled: true           # Set to true to enable Claude Vision figure extraction
-  model: "claude-sonnet-4-20250514"
-  api_key: ""              # Uses ANTHROPIC_API_KEY env var if empty
-  max_candidates: 30       # Max frames to analyze with Vision API (cost control)
-  complexity_threshold: 0.05  # Min visual complexity score to be a candidate
+cleanup:
+  delete_video_after_run: true
+  delete_frames_after_run: false
