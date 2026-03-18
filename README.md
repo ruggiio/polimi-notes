@@ -12,6 +12,15 @@ Webex URL → [Playwright SSO] → .mp4 → [faster-whisper] → transcript
 
 ---
 
+## Branches
+
+| Branch | University | Platform | Authentication |
+|--------|-----------|----------|----------------|
+| [`main`](https://github.com/ruggiio/polimi-notes/tree/main) | Politecnico di Milano | Webex | PoliMi SSO |
+| [`sharepoint`](https://github.com/ruggiio/polimi-notes/tree/sharepoint) | University of Parma (UniPR) | SharePoint / OneDrive | Microsoft SSO |
+
+---
+
 ## Requirements
 
 - **Windows 10/11**, 64-bit
