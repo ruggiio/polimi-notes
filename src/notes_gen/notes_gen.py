@@ -375,12 +375,14 @@ def _generate_claude(
         messages = [{"role": "user", "content": prompt}]
 
         while True:
+            import httpx
             kwargs = {
                 "model": model,
                 "max_tokens": max_tokens,
                 "system": SYSTEM_PROMPT,
                 "messages": messages,
                 "tools": TOOL_DEFINITIONS,
+                "timeout": httpx.Timeout(timeout=900.0, connect=30.0),
             }
             response = client.messages.create(**kwargs)
 
