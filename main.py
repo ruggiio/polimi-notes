@@ -9,6 +9,7 @@ Usage examples:
   python main.py run URL --no-download --no-transcribe --video my.mp4
   python main.py transcribe-only my_lecture.mp4
   python main.py notes-only transcript.txt --ocr ocr.json
+  python main.py index-course --course "Analisi 2"
 """
 
 import json
@@ -102,6 +103,28 @@ def _cleanup_video(video_path: Path):
         size_mb = video_path.stat().st_size / 1_000_000
         video_path.unlink()
         console.print(f"[dim]  Removed video ({size_mb:.0f} MB): {video_path}[/dim]")
+
+
+def _init_rag(cfg: dict):
+    """Initialize RAG if enabled. Returns CourseRAG instance or None."""
+    rag_cfg = cfg.get("rag", {})
+    if not rag_cfg.get("enabled", False):
+        return None
+
+    try:
+        from src.rag.rag import CourseRAG
+        return CourseRAG(
+            db_path=rag_cfg.get("db_path", "output/rag"),
+            chunk_size=rag_cfg.get("chunk_size", 500),
+            chunk_overlap=rag_cfg.get("chunk_overlap", 50),
+        )
+    except ImportError as e:
+        console.print(f"[yellow]⚠ RAG dependencies not installed: {e}[/yellow]")
+        console.print("[dim]Install with: pip install chromadb sentence-transformers pdfplumber[/dim]")
+        return None
+    except Exception as e:
+        console.print(f"[yellow]⚠ RAG initialization failed: {e}[/yellow]")
+        return None
 
 
 @app.command()
@@ -231,6 +254,7 @@ def run(
             frames=frames,
             languages=ocrcfg["languages"],
             gpu=ocrcfg["gpu"],
+            vision_for_handwriting=ocrcfg.get("vision_for_handwriting", False),
         )
         save_ocr_results(ocr_results, Path(ocrcfg["output_dir"]), stem)
         merged_data = align_ocr_with_transcript(ocr_results, transcript_result["segments"])
@@ -282,6 +306,22 @@ def run(
     elif figures_enabled and not frames:
         console.print("[yellow]⚠ Figure extraction enabled but no frames available[/yellow]")
 
+    # ── RAG: query previous lectures for context ─────────────────────────────
+    rag_context = None
+    rag = _init_rag(cfg)
+    if rag is not None and not no_notes:
+        rag_cfg = cfg.get("rag", {})
+        if rag.course_exists(course):
+            # Build a query from first ~200 words of transcript
+            query_text = " ".join(transcript_result["text"].split()[:200])
+            rag_context = rag.query_context(
+                query_text=query_text,
+                course_name=course,
+                n_results=rag_cfg.get("n_results", 5),
+            )
+            if rag_context:
+                console.print(f"[green]✓ RAG: retrieved context from previous lectures[/green]")
+
     # ── Step 4: Notes Generation ──────────────────────────────────────────────
     if not no_notes:
         from src.notes_gen.notes_gen import generate_notes
@@ -291,6 +331,8 @@ def run(
         active_backend = backend or ncfg["backend"]
         backend_config = ncfg.get(active_backend, {})
         backend_config["math_only_ocr"] = cfg.get("ocr", {}).get("math_only_filter", True)
+        backend_config["use_tools"] = ncfg.get("use_tools", False)
+        backend_config["auto_fix_latex"] = ncfg.get("auto_fix_latex", False)
         pdf_output_dir = Path(ncfg["latex"].get("pdf_output_dir", "output/notes"))
 
         tex_path = generate_notes(
@@ -306,7 +348,16 @@ def run(
             pdf_output_dir=pdf_output_dir,
             figures=figures if figures else None,
             suffix=suffix,
+            rag_context=rag_context,
         )
+
+        # ── RAG: index current lecture after successful generation ────────────
+        if rag is not None:
+            rag.add_lecture(
+                transcript=transcript_result["text"],
+                course_name=course,
+                lecture_date=lecture_date,
+            )
 
         # ── Step 5: Cleanup video (heavy file, no longer needed) ──────────────
         if not no_download and not no_cleanup:
@@ -372,7 +423,22 @@ def notes_only(
 
     ncfg = cfg["notes"]
     active_backend = backend or ncfg["backend"]
+    backend_config = ncfg.get(active_backend, {})
+    backend_config["use_tools"] = ncfg.get("use_tools", False)
+    backend_config["auto_fix_latex"] = ncfg.get("auto_fix_latex", False)
     pdf_output_dir = Path(ncfg["latex"].get("pdf_output_dir", "output/notes"))
+
+    # RAG context for notes-only mode
+    rag_context = None
+    rag = _init_rag(cfg)
+    if rag is not None and rag.course_exists(course):
+        query_text = " ".join(text.split()[:200])
+        rag_cfg = cfg.get("rag", {})
+        rag_context = rag.query_context(
+            query_text=query_text,
+            course_name=course,
+            n_results=rag_cfg.get("n_results", 5),
+        )
 
     generate_notes(
         merged_data=merged_data,
@@ -381,11 +447,59 @@ def notes_only(
         course_name=course,
         lecture_date=lecture_date,
         backend=active_backend,
-        backend_config=ncfg.get(active_backend, {}),
+        backend_config=backend_config,
         compile_pdf_flag=ncfg["latex"]["compile_pdf"],
         transcript_path=transcript,
         pdf_output_dir=pdf_output_dir,
+        rag_context=rag_context,
     )
+
+
+@app.command(name="index-course")
+def index_course(
+    course: str = typer.Option(..., "--course", "-c", help="Course name to index"),
+    config_path: Path = typer.Option(CONFIG_PATH, "--config"),
+):
+    """Index all existing PDF notes for a course into the RAG database."""
+    cfg = load_config(config_path)
+
+    rag_cfg = cfg.get("rag", {})
+    if not rag_cfg.get("enabled", False):
+        console.print("[yellow]⚠ RAG is not enabled in config. Set rag.enabled: true first.[/yellow]")
+        raise typer.Exit(1)
+
+    rag = _init_rag(cfg)
+    if rag is None:
+        console.print("[red]Failed to initialize RAG[/red]")
+        raise typer.Exit(1)
+
+    notes_dir = Path(cfg["notes"]["latex"].get("pdf_output_dir", "output/notes"))
+    if not notes_dir.exists():
+        console.print(f"[red]Notes directory not found:[/red] {notes_dir}")
+        raise typer.Exit(1)
+
+    # Find PDFs matching the course name (case-insensitive)
+    course_lower = course.lower()
+    pdfs = [
+        p for p in notes_dir.glob("*.pdf")
+        if course_lower in p.stem.lower()
+    ]
+
+    if not pdfs:
+        console.print(f"[yellow]No PDFs found matching '{course}' in {notes_dir}[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(f"[cyan]Found {len(pdfs)} PDFs to index for '{course}':[/cyan]")
+    total_chunks = 0
+    for pdf in sorted(pdfs):
+        console.print(f"  [dim]{pdf.name}[/dim]")
+        chunks = rag.add_from_pdf(pdf, course)
+        total_chunks += chunks
+
+    console.print(Panel.fit(
+        f"[bold green]✓ Indexed {len(pdfs)} PDFs ({total_chunks} chunks) for '{course}'[/bold green]",
+        border_style="green"
+    ))
 
 
 if __name__ == "__main__":

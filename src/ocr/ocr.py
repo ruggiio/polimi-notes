@@ -2,7 +2,9 @@
 ocr.py — Frame extraction + OCR for lecture slides and blackboard content
 """
 
+import base64
 import json
+import os
 from pathlib import Path
 from dataclasses import dataclass, asdict
 
@@ -81,12 +83,77 @@ def extract_frames(
     return frames_out
 
 
-# ── Slide vs. Blackboard Heuristic ───────────────────────────────────────────
+# ── Frame Type Classification ────────────────────────────────────────────────
+
+def _detect_frame_type(img: np.ndarray) -> str:
+    """
+    Classify a frame as 'slide', 'blackboard', or 'tablet'.
+
+    - slide:      bright background (mean > 180) and low variance (std < 60)
+    - blackboard: dark background (mean < 80)
+    - tablet:     everything else (handwritten tablet notes)
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    mean_brightness = float(gray.mean())
+    std_brightness = float(gray.std())
+
+    if mean_brightness > 180 and std_brightness < 60:
+        return "slide"
+    elif mean_brightness < 80:
+        return "blackboard"
+    else:
+        return "tablet"
+
+
+# ── Slide vs. Blackboard Heuristic (legacy, kept for compatibility) ──────────
 
 def _is_slide(frame_bgr: np.ndarray) -> bool:
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     mean_brightness = gray.mean()
     return bool(mean_brightness > 128)
+
+
+# ── Claude Vision OCR ────────────────────────────────────────────────────────
+
+def _ocr_with_vision(img: np.ndarray, client, model: str) -> list[dict]:
+    """
+    Use Claude Vision API to OCR handwritten or blackboard content.
+    Returns list of {"text": str, "confidence": 1.0} blocks.
+    """
+    _, buffer = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    img_b64 = base64.b64encode(buffer).decode("utf-8")
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=2048,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": img_b64,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "Transcribe ALL text visible in this image exactly as written, "
+                        "preserving spatial layout. Include mathematical formulas, labels "
+                        "on diagrams, and any handwritten annotations. Return only the "
+                        "transcribed text, nothing else."
+                    ),
+                },
+            ],
+        }],
+    )
+
+    text = response.content[0].text.strip()
+    if not text:
+        return []
+    return [{"text": text, "confidence": 1.0}]
 
 
 # ── OCR ───────────────────────────────────────────────────────────────────────
@@ -95,6 +162,7 @@ def run_ocr(
     frames: list[tuple[float, Path]],
     languages: list[str] = ("it", "en"),
     gpu: bool = True,
+    vision_for_handwriting: bool = False,
 ) -> list[FrameOCRResult]:
     console.print(f"\n[bold cyan]── OCR Analysis ────────────────────────────────[/bold cyan]")
     console.print(f"Languages: {languages}  |  GPU: {gpu}  |  Frames: {len(frames)}")
@@ -103,23 +171,74 @@ def run_ocr(
     reader = easyocr.Reader(list(languages), gpu=gpu)
     results: list[FrameOCRResult] = []
 
+    # Set up Claude Vision client if vision_for_handwriting is enabled
+    vision_client = None
+    vision_model = None
+    if vision_for_handwriting:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if api_key:
+            try:
+                import anthropic
+                vision_client = anthropic.Anthropic(api_key=api_key)
+                vision_model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+                console.print("[cyan]Vision OCR enabled for handwriting/blackboard frames[/cyan]")
+            except ImportError:
+                console.print("[yellow]⚠ anthropic package not installed — falling back to EasyOCR for all frames[/yellow]")
+        else:
+            console.print("[dim]Vision OCR: no ANTHROPIC_API_KEY set — using EasyOCR for all frames[/dim]")
+
     for i, (timestamp, frame_path) in enumerate(track(frames, description="Running OCR...")):
         frame_bgr = cv2.imread(str(frame_path))
         if frame_bgr is None:
             continue
 
-        is_slide_frame = _is_slide(frame_bgr)
-        if not is_slide_frame:
-            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-            frame_bgr = cv2.cvtColor(cv2.equalizeHist(gray), cv2.COLOR_GRAY2BGR)
+        frame_type = _detect_frame_type(frame_bgr)
+        is_slide_frame = frame_type == "slide"
 
-        ocr_output = reader.readtext(frame_bgr)
+        # Route based on frame type
+        if frame_type == "slide":
+            # Existing EasyOCR pipeline for slides
+            ocr_output = reader.readtext(frame_bgr)
+            blocks = [
+                {"text": str(text), "confidence": float(conf)}
+                for (_, text, conf) in ocr_output
+                if float(conf) > 0.3 and len(str(text).strip()) > 1
+            ]
+        elif frame_type in ("tablet", "blackboard") and vision_client is not None:
+            # Claude Vision for handwriting/blackboard
+            ocr_frame = frame_bgr
+            if frame_type == "blackboard":
+                # Apply CLAHE contrast enhancement for blackboard frames
+                gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+                enhanced = clahe.apply(gray)
+                ocr_frame = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+            try:
+                blocks = _ocr_with_vision(ocr_frame, vision_client, vision_model)
+            except Exception as e:
+                console.print(f"[yellow]⚠ Vision OCR failed for frame {i}, falling back to EasyOCR: {e}[/yellow]")
+                # Fall back to EasyOCR
+                if frame_type == "blackboard":
+                    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+                    frame_bgr = cv2.cvtColor(cv2.equalizeHist(gray), cv2.COLOR_GRAY2BGR)
+                ocr_output = reader.readtext(frame_bgr)
+                blocks = [
+                    {"text": str(text), "confidence": float(conf)}
+                    for (_, text, conf) in ocr_output
+                    if float(conf) > 0.3 and len(str(text).strip()) > 1
+                ]
+        else:
+            # EasyOCR fallback for tablet/blackboard when vision is not available
+            if not is_slide_frame:
+                gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+                frame_bgr = cv2.cvtColor(cv2.equalizeHist(gray), cv2.COLOR_GRAY2BGR)
+            ocr_output = reader.readtext(frame_bgr)
+            blocks = [
+                {"text": str(text), "confidence": float(conf)}
+                for (_, text, conf) in ocr_output
+                if float(conf) > 0.3 and len(str(text).strip()) > 1
+            ]
 
-        blocks = [
-            {"text": str(text), "confidence": float(conf)}
-            for (_, text, conf) in ocr_output
-            if float(conf) > 0.3 and len(str(text).strip()) > 1
-        ]
         raw_text = " ".join(b["text"] for b in blocks)
 
         results.append(FrameOCRResult(
