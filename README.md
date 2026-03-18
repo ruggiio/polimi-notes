@@ -1,14 +1,25 @@
-# PoliMi Lecture Notes Pipeline
+# Lecture Notes Pipeline — SharePoint / OneDrive
 
-Automatically downloads Webex lecture recordings from Politecnico di Milano, transcribes the audio with Whisper, extracts and OCR-analyses slide/blackboard frames, selects important figures using Claude Vision, and generates structured LaTeX notes with an LLM — producing a complete PDF ready for studying.
+> University of Parma (UniPR) — Microsoft SSO variant. For the Politecnico di Milano / Webex version see the [`main`](https://github.com/ruggiio/polimi-notes/tree/main) branch.
+
+Automatically downloads lecture recordings from SharePoint / OneDrive (University of Parma), transcribes the audio with Whisper, extracts and OCR-analyses slide/blackboard frames, selects important figures using Claude Vision, and generates structured LaTeX notes with an LLM — producing a complete PDF ready for studying.
 
 ```
-Webex URL → [Playwright SSO] → .mp4 → [faster-whisper] → transcript
+SharePoint URL → [Microsoft SSO] → .mp4 → [faster-whisper] → transcript
                                                         ↘
                                          [ffmpeg + EasyOCR] → slide text + figures
                                                         ↘
                                               [Claude API] → .tex → .pdf
 ```
+
+---
+
+## Branches
+
+| Branch | University | Platform | Authentication |
+|--------|-----------|----------|----------------|
+| [`main`](https://github.com/ruggiio/polimi-notes/tree/main) | Politecnico di Milano | Webex | PoliMi SSO |
+| [`sharepoint`](https://github.com/ruggiio/polimi-notes/tree/sharepoint) | University of Parma (UniPR) | SharePoint / OneDrive | Microsoft SSO |
 
 ---
 
@@ -28,7 +39,7 @@ Webex URL → [Playwright SSO] → .mp4 → [faster-whisper] → transcript
 ### 1. Clone the repository
 
 ```bat
-
+git clone --branch sharepoint https://github.com/ruggiio/polimi-notes.git
 cd polimi-notes
 ```
 
@@ -98,16 +109,13 @@ notepad .env
 Fill in:
 
 ```
-POLIMI_USER=10XXXXXX          # Your PoliMi Person Code (numeric)
-POLIMI_EMAIL=name.surname@mail.polimi.it   # Your PoliMi institutional email
-POLIMI_PASS=your_password
+MICROSOFT_EMAIL=name.surname@unipr.it   # Your UniPR institutional email
+MICROSOFT_PASS=your_password
 
 ANTHROPIC_API_KEY=sk-ant-...  # Get from console.anthropic.com
 ```
 
-> ⚠️ **Important:** `POLIMI_USER` is your numeric Person Code (e.g. `10812345`).
-> `POLIMI_EMAIL` is your full institutional email used to log into Webex.
-> These are two different values — both are required.
+> ⚠️ **Important:** `MICROSOFT_EMAIL` must be your full institutional email (e.g. `name.surname@unipr.it`).
 
 ### Step 2 — Review `config/config.yaml`
 
@@ -304,7 +312,7 @@ Per lecture (1.5h) with default settings (`claude` backend, figures enabled):
 - This is a known limitation — the button is covered by a CSS overlay
 
 ### Video not downloading
-- Delete cookies and retry: `del config\webex_cookies.json`
+- Delete cookies and retry: `del config\ms_cookies.json`
 - Run with `--headed` to debug
 
 ### Whisper CUDA out of memory
@@ -329,12 +337,12 @@ Per lecture (1.5h) with default settings (`claude` backend, figures enabled):
 ## Privacy & Security
 
 - Your credentials are stored only in `.env` on your local machine
-- They are only sent to `auth.polimi.it` and `aunicalogin.polimi.it` via the browser
+- They are only sent to Microsoft/UniPR login endpoints via the browser
 - The `.env` file is gitignored and will never be committed to GitHub
-- Cookies are saved locally in `config/webex_cookies.json` (also gitignored)
+- Cookies are saved locally in `config/ms_cookies.json` (also gitignored)
 
 ---
 
 ## License
 
-MIT — personal use only. Respect Politecnico di Milano's terms of service regarding lecture recordings.
+MIT — personal use only. Respect the University of Parma's terms of service regarding lecture recordings.
