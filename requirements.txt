@@ -27,3 +27,8 @@ openai>=1.30           # OpenAI API (optional)
 
 # LaTeX utilities
 pylatex>=1.4           # For template generation helpers
+
+# RAG (optional — needed only if rag.enabled: true)
+chromadb
+sentence-transformers
+pdfplumber

@@ -26,9 +26,13 @@ ocr:
   gpu: true
   math_only_filter: false   # true  = keep only formulas/symbols from slides (cheaper)
                              # false = keep ALL slide text not in transcript (recommended)
+  vision_for_handwriting: false  # true = use Claude Vision for handwritten/blackboard frames
+                                  # requires ANTHROPIC_API_KEY env var
 
 notes:
   backend: "claude"
+  use_tools: false          # true = enable Claude tool use for transcript/OCR/figure lookup
+  auto_fix_latex: true      # true = auto-retry LaTeX compilation with LLM error fixing
 
   claude:
     model: "claude-sonnet-4-20250514"
@@ -55,3 +59,10 @@ figures:
   api_key: ""              # Uses ANTHROPIC_API_KEY env var if empty
   max_candidates: 30       # Max frames to analyze with Vision API (cost control)
   complexity_threshold: 0.05  # Min visual complexity score to be a candidate
+
+rag:
+  enabled: false            # true = enable RAG for cross-lecture context
+  db_path: "output/rag"    # ChromaDB persistent storage path
+  n_results: 5             # Number of passages to retrieve
+  chunk_size: 500          # Words per chunk when indexing
+  chunk_overlap: 50        # Word overlap between chunks

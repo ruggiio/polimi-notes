@@ -7,6 +7,7 @@ OCR filtering pipeline:
   3. Pass filtered OCR + full transcript to Claude in a single call
 """
 
+import json
 import os
 import re
 import subprocess
@@ -164,6 +165,7 @@ def _build_prompt(
     course_name: str,
     lecture_date: str,
     figures: list[dict] = None,
+    rag_context: str = None,
 ) -> str:
     prompt = f"""Convert the following lecture transcript into complete, comprehensive LaTeX notes.
 Write with a bookish, refined academic style — not a transcript dump, but polished notes a student would enjoy reading.
@@ -206,32 +208,231 @@ Insert each figure near the section where the corresponding topic is discussed (
                 f"caption={fig['caption']}\n"
             )
 
+    if rag_context:
+        prompt += f"""
+--- CONTEXT FROM PREVIOUS LECTURES IN THIS COURSE ---
+(Use this context to maintain consistency with terminology, notation, and concepts
+introduced in previous lectures. Reference prior material where appropriate.)
+{rag_context}
+"""
+
     prompt += "\nProduce the complete .tex file now, covering the entire lecture:"
     return prompt
 
 
+# ── Tool Definitions for Claude Tool Use ─────────────────────────────────────
+
+TOOL_DEFINITIONS = [
+    {
+        "name": "search_transcript",
+        "description": (
+            "Search the lecture transcript for a specific query. "
+            "Returns the top 3 matching passages with their approximate position in the text."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query to find in the transcript.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_ocr_at_timestamp",
+        "description": (
+            "Get OCR text from frames near a specific timestamp in the lecture. "
+            "Returns OCR text from frames within the specified time window."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "timestamp_seconds": {
+                    "type": "number",
+                    "description": "The timestamp in seconds to search around.",
+                },
+                "window_seconds": {
+                    "type": "number",
+                    "description": "The time window (in seconds) around the timestamp to search.",
+                    "default": 60,
+                },
+            },
+            "required": ["timestamp_seconds"],
+        },
+    },
+    {
+        "name": "get_figure_at_timestamp",
+        "description": (
+            "Get the closest figure to a given timestamp. "
+            "Returns the latex_path of the figure closest to the specified time."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "timestamp_seconds": {
+                    "type": "number",
+                    "description": "The timestamp in seconds to find the nearest figure.",
+                },
+            },
+            "required": ["timestamp_seconds"],
+        },
+    },
+]
+
+
+def _execute_tool(
+    tool_name: str,
+    tool_input: dict,
+    transcript: str,
+    merged_data: list[dict],
+    figures: list[dict],
+) -> str:
+    """Execute a tool call and return the result as a string."""
+    if tool_name == "search_transcript":
+        query = tool_input.get("query", "").lower()
+        words = query.split()
+        # Split transcript into overlapping chunks and score them
+        transcript_words = transcript.split()
+        chunk_size = 100
+        step = 50
+        scored = []
+        for i in range(0, len(transcript_words), step):
+            chunk = " ".join(transcript_words[i:i + chunk_size])
+            chunk_lower = chunk.lower()
+            score = sum(1 for w in words if w in chunk_lower)
+            if score > 0:
+                position_pct = round(100 * i / max(len(transcript_words), 1))
+                scored.append((score, position_pct, chunk))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = scored[:3]
+        if not top:
+            return "No matching passages found for the query."
+        results = []
+        for score, pos, chunk in top:
+            results.append(f"[Position: ~{pos}% through lecture]\n{chunk}")
+        return "\n\n---\n\n".join(results)
+
+    elif tool_name == "get_ocr_at_timestamp":
+        ts = tool_input.get("timestamp_seconds", 0)
+        window = tool_input.get("window_seconds", 60)
+        matching = [
+            entry for entry in merged_data
+            if abs(entry.get("timestamp_sec", 0) - ts) <= window
+        ]
+        if not matching:
+            return f"No OCR data found within {window}s of timestamp {ts}s."
+        ocr_texts = []
+        for entry in matching:
+            ocr = entry.get("ocr_text", "").strip()
+            if ocr:
+                t = entry.get("timestamp_sec", 0)
+                mins = int(t // 60)
+                secs = int(t % 60)
+                ocr_texts.append(f"[{mins:02d}:{secs:02d}] {ocr}")
+        if not ocr_texts:
+            return f"Frames found near {ts}s but no OCR text extracted."
+        return "\n".join(ocr_texts)
+
+    elif tool_name == "get_figure_at_timestamp":
+        ts = tool_input.get("timestamp_seconds", 0)
+        if not figures:
+            return "No figures available."
+        closest = min(figures, key=lambda f: abs(f["timestamp"] - ts))
+        dist = abs(closest["timestamp"] - ts)
+        return (
+            f"Closest figure ({dist:.0f}s away):\n"
+            f"  latex_path: {closest['latex_path']}\n"
+            f"  caption: {closest['caption']}\n"
+            f"  timestamp: {closest['timestamp']:.1f}s"
+        )
+
+    return f"Unknown tool: {tool_name}"
+
+
 # ── LLM Backends ─────────────────────────────────────────────────────────────
 
-def _generate_claude(prompt: str, model: str, api_key: str, max_tokens: int = 16000) -> str:
+def _generate_claude(
+    prompt: str,
+    model: str,
+    api_key: str,
+    max_tokens: int = 16000,
+    use_tools: bool = False,
+    transcript: str = "",
+    merged_data: list[dict] = None,
+    figures: list[dict] = None,
+) -> str:
     import anthropic
     key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
         raise ValueError("No Anthropic API key found.")
     client = anthropic.Anthropic(api_key=key)
-    console.print(f"[cyan]Generating notes via Claude ({model}) with streaming...[/cyan]")
 
-    full_response = ""
-    with client.messages.stream(
-        model=model,
-        max_tokens=max_tokens,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-    ) as stream:
-        for text in stream.text_stream:
-            full_response += text
-            print(text, end="", flush=True)
-    print()
-    return full_response
+    if use_tools:
+        # Non-streaming mode with tool use
+        console.print(f"[cyan]Generating notes via Claude ({model}) with tool use...[/cyan]")
+        messages = [{"role": "user", "content": prompt}]
+
+        while True:
+            kwargs = {
+                "model": model,
+                "max_tokens": max_tokens,
+                "system": SYSTEM_PROMPT,
+                "messages": messages,
+                "tools": TOOL_DEFINITIONS,
+            }
+            response = client.messages.create(**kwargs)
+
+            # Check if response contains tool use blocks
+            has_tool_use = any(
+                block.type == "tool_use" for block in response.content
+            )
+
+            if not has_tool_use:
+                # Final response — extract text
+                text_parts = [
+                    block.text for block in response.content
+                    if block.type == "text"
+                ]
+                full_response = "".join(text_parts)
+                print(full_response[:200] + "..." if len(full_response) > 200 else full_response)
+                return full_response
+
+            # Process tool use blocks
+            messages.append({"role": "assistant", "content": response.content})
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    console.print(f"[dim]  Tool call: {block.name}({json.dumps(block.input)})[/dim]")
+                    result = _execute_tool(
+                        block.name,
+                        block.input,
+                        transcript,
+                        merged_data or [],
+                        figures or [],
+                    )
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })
+            messages.append({"role": "user", "content": tool_results})
+    else:
+        # Streaming mode (original behavior)
+        console.print(f"[cyan]Generating notes via Claude ({model}) with streaming...[/cyan]")
+        full_response = ""
+        with client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            for text in stream.text_stream:
+                full_response += text
+                print(text, end="", flush=True)
+        print()
+        return full_response
 
 
 def _generate_ollama(prompt: str, model: str = "mistral", host: str = "http://localhost:11434") -> str:
@@ -265,13 +466,25 @@ def _generate_openai(prompt: str, model: str = "gpt-4o", api_key: str = "", max_
     return response.choices[0].message.content
 
 
-def _call_backend(prompt: str, backend: str, cfg: dict) -> str:
+def _call_backend(
+    prompt: str,
+    backend: str,
+    cfg: dict,
+    use_tools: bool = False,
+    transcript: str = "",
+    merged_data: list[dict] = None,
+    figures: list[dict] = None,
+) -> str:
     if backend == "claude":
         return _generate_claude(
             prompt,
             model=cfg.get("model", "claude-sonnet-4-20250514"),
             api_key=cfg.get("api_key", ""),
             max_tokens=cfg.get("max_tokens", 16000),
+            use_tools=use_tools,
+            transcript=transcript,
+            merged_data=merged_data,
+            figures=figures,
         )
     elif backend == "ollama":
         return _generate_ollama(
@@ -321,27 +534,126 @@ def _make_pdf_filename(course_name: str, lecture_date: str, suffix: str = None) 
     return f"{filename}.pdf"
 
 
+def _auto_fix_latex(
+    tex_path: Path,
+    latex_content: str,
+    errors: str,
+    backend: str,
+    cfg: dict,
+) -> str | None:
+    """
+    Send LaTeX errors to Claude for auto-fix. Returns fixed LaTeX or None.
+    """
+    fix_prompt = (
+        "The following LaTeX errors occurred when compiling these notes. "
+        "Fix ONLY the errors listed and return the complete corrected .tex file:\n\n"
+        f"ERRORS:\n{errors}\n\n"
+        f"LATEX:\n{latex_content}"
+    )
+
+    console.print("[cyan]Attempting auto-fix of LaTeX errors...[/cyan]")
+
+    try:
+        if backend == "claude":
+            import anthropic
+            key = cfg.get("api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+            if not key:
+                return None
+            client = anthropic.Anthropic(api_key=key)
+            response = client.messages.create(
+                model=cfg.get("model", "claude-sonnet-4-20250514"),
+                max_tokens=cfg.get("max_tokens", 16000),
+                system="You are a LaTeX expert. Fix the compilation errors and return the complete corrected .tex file. Output ONLY the LaTeX code, nothing else.",
+                messages=[{"role": "user", "content": fix_prompt}],
+            )
+            return _clean_latex(response.content[0].text)
+        elif backend == "openai":
+            from openai import OpenAI
+            key = cfg.get("api_key", "") or os.environ.get("OPENAI_API_KEY", "")
+            if not key:
+                return None
+            client = OpenAI(api_key=key)
+            response = client.chat.completions.create(
+                model=cfg.get("model", "gpt-4o"),
+                messages=[
+                    {"role": "system", "content": "You are a LaTeX expert. Fix the compilation errors and return the complete corrected .tex file. Output ONLY the LaTeX code, nothing else."},
+                    {"role": "user", "content": fix_prompt},
+                ],
+                max_tokens=cfg.get("max_tokens", 16000),
+            )
+            return _clean_latex(response.choices[0].message.content)
+        else:
+            # Ollama or unknown backend — skip auto-fix
+            return None
+    except Exception as e:
+        console.print(f"[yellow]⚠ Auto-fix API call failed: {e}[/yellow]")
+        return None
+
+
 def compile_pdf(
     tex_path: Path,
     pdf_output_dir: Path,
     course_name: str,
     lecture_date: str,
     suffix: str = None,
+    auto_fix: bool = False,
+    backend: str = "claude",
+    backend_config: dict = None,
 ) -> Path | None:
     """
     Compile the .tex file and save the PDF to pdf_output_dir with a descriptive filename.
     The .tex is compiled in its own directory (latex/) then the PDF is copied to notes/.
+    If auto_fix is True and compilation fails, attempt to fix errors with an LLM call.
     """
     pdf_output_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = ["pdflatex", "-interaction=nonstopmode",
            "-output-directory", str(tex_path.parent),
            str(tex_path)]
-    try:
-        for _ in range(2):  # Run twice for cross-references
-            subprocess.run(cmd, capture_output=True, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        console.print(f"[yellow]⚠ pdflatex not available or failed: {e}[/yellow]")
+
+    def _run_pdflatex() -> tuple[bool, str]:
+        """Run pdflatex twice. Returns (success, error_text)."""
+        try:
+            for _ in range(2):
+                result = subprocess.run(cmd, capture_output=True)
+                if result.returncode != 0:
+                    # Read the .log file for error details
+                    log_path = tex_path.with_suffix(".log")
+                    error_lines = []
+                    if log_path.exists():
+                        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                        for line in log_text.splitlines():
+                            if line.startswith("!"):
+                                error_lines.append(line)
+                    return False, "\n".join(error_lines) if error_lines else "Unknown compilation error"
+            return True, ""
+        except FileNotFoundError:
+            return False, "pdflatex not found"
+
+    success, errors = _run_pdflatex()
+
+    if not success and auto_fix and errors != "pdflatex not found":
+        console.print(f"[yellow]⚠ LaTeX compilation failed. Errors:[/yellow]")
+        for line in errors.splitlines()[:10]:
+            console.print(f"  [dim]{line}[/dim]")
+
+        latex_content = tex_path.read_text(encoding="utf-8")
+        fixed = _auto_fix_latex(tex_path, latex_content, errors, backend, backend_config or {})
+
+        if fixed:
+            tex_path.write_text(fixed, encoding="utf-8")
+            console.print("[cyan]Retrying compilation with fixed LaTeX...[/cyan]")
+            success, retry_errors = _run_pdflatex()
+            if not success:
+                console.print(f"[yellow]⚠ Auto-fix compilation also failed: {retry_errors[:200]}[/yellow]")
+                # Restore original
+                tex_path.write_text(latex_content, encoding="utf-8")
+                console.print("[dim]Restored original .tex file[/dim]")
+        else:
+            console.print("[yellow]⚠ Auto-fix could not generate corrected LaTeX[/yellow]")
+
+    if not success and errors == "pdflatex not found":
+        console.print(f"[yellow]⚠ pdflatex not available[/yellow]")
         console.print("[dim]Install MiKTeX or TeX Live to auto-compile PDFs.[/dim]")
         return None
 
@@ -388,6 +700,7 @@ def generate_notes(
     pdf_output_dir: Path = None,
     figures: list[dict] = None,
     suffix: str = None,
+    rag_context: str = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     cfg = backend_config or {}
@@ -403,6 +716,13 @@ def generate_notes(
         console.print(f"Suffix:    {suffix}")
     if figures:
         console.print(f"Figures:   {len(figures)} to embed")
+
+    use_tools = cfg.get("use_tools", False) and backend == "claude"
+    auto_fix = cfg.get("auto_fix_latex", False)
+    if use_tools:
+        console.print("[cyan]Tool use: enabled[/cyan]")
+    if auto_fix:
+        console.print("[cyan]Auto-fix LaTeX: enabled[/cyan]")
 
     # ── Load full transcript ──────────────────────────────────────────────────
     full_transcript = ""
@@ -441,8 +761,17 @@ def generate_notes(
 
     if len(words) <= MAX_WORDS_PER_CHUNK:
         console.print(f"  Chunk 1/1...")
-        prompt = _build_prompt(full_transcript, filtered_ocr, course_name, lecture_date, figures)
-        raw = _call_backend(prompt, backend, cfg)
+        prompt = _build_prompt(
+            full_transcript, filtered_ocr, course_name, lecture_date,
+            figures, rag_context,
+        )
+        raw = _call_backend(
+            prompt, backend, cfg,
+            use_tools=use_tools,
+            transcript=full_transcript,
+            merged_data=merged_data,
+            figures=figures,
+        )
         final_latex = _clean_latex(raw)
     else:
         chunks = [words[i:i + MAX_WORDS_PER_CHUNK] for i in range(0, len(words), MAX_WORDS_PER_CHUNK)]
@@ -451,15 +780,22 @@ def generate_notes(
         for i, chunk_words in enumerate(chunks):
             console.print(f"  Chunk {i+1}/{len(chunks)}...")
             chunk_text = " ".join(chunk_words)
-            # Only pass figures to first chunk
+            # Only pass figures and RAG context to first chunk
             prompt = _build_prompt(
                 chunk_text,
                 filtered_ocr if i == 0 else "",
                 course_name,
                 lecture_date,
                 figures if i == 0 else None,
+                rag_context if i == 0 else None,
             )
-            raw = _call_backend(prompt, backend, cfg)
+            raw = _call_backend(
+                prompt, backend, cfg,
+                use_tools=use_tools and i == 0,
+                transcript=full_transcript,
+                merged_data=merged_data,
+                figures=figures,
+            )
             latex_sections.append(_clean_latex(raw))
         final_latex = _merge_latex_chunks(latex_sections)
 
@@ -469,6 +805,9 @@ def generate_notes(
     console.print(f"[green]✓ LaTeX saved:[/green] {tex_path}")
 
     if compile_pdf_flag:
-        compile_pdf(tex_path, pdf_output_dir, course_name, lecture_date, suffix)
+        compile_pdf(
+            tex_path, pdf_output_dir, course_name, lecture_date, suffix,
+            auto_fix=auto_fix, backend=backend, backend_config=cfg,
+        )
 
     return tex_path
