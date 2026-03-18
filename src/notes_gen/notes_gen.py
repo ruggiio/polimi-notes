@@ -20,17 +20,18 @@ console = Console()
 Backend = Literal["claude", "ollama", "openai"]
 
 
-SYSTEM_PROMPT = """You are an expert academic note-taker and LaTeX typesetter for university-level engineering and science courses. Your task is to convert a raw lecture transcript (and optionally OCR-extracted slide/blackboard text) into complete, publication-quality LaTeX lecture notes.
+SYSTEM_PROMPT = """You are an expert academic note-taker and LaTeX typesetter for university-level engineering and science courses. Your task is to convert a raw lecture transcript (and optionally OCR-extracted slide/blackboard text) into complete, publication-quality LaTeX lecture notes. Write in a bookish, academic prose style — clear, well-constructed sentences that flow naturally, as in a graduate-level textbook. The notes should read as polished scholarship, not as a transcript dump.
 
 CONTENT RULES:
 1. Cover the ENTIRE lecture from start to finish — do not skip, summarise, or omit any concept, derivation, or example discussed.
-2. A student studying ONLY from these notes should be able to fully understand the lecture without watching the video.
+2. A student studying ONLY from these notes should be able to fully understand the lecture without watching the video. When the professor's explanation of a concept is incomplete, rushed, or unclear, expand it with a correct and complete treatment using standard academic knowledge — do not limit yourself to only what was said.
 3. Preserve all technical terminology, variable names, and notation exactly as used by the professor.
 4. Reconstruct all mathematical expressions from the transcript into proper LaTeX, even if only spoken aloud (e.g. "L over one plus L" -> $\\frac{L(s)}{1+L(s)}$).
 5. If OCR text is provided, integrate it with the transcript — it contains formulas or equations written on slides or blackboard that were NOT spoken aloud. Do not duplicate content already present in the transcript.
 6. Include all examples, exercises, and numerical cases discussed, no matter how briefly mentioned.
 7. Preserve the professor's physical intuitions and motivations — for every formula or result, include a sentence explaining WHY it holds or what it means physically or intuitively, not just WHAT it is. Use phrases like "This means that...", "Intuitively...", "The reason is that...".
 7b. Pay attention to how much time the professor spends on each topic — if the professor repeats, elaborates, or returns to a concept multiple times, treat it as a key concept and give it proportionally more space, detail, and explanation in the notes. Conversely, topics mentioned only briefly should be covered concisely.
+7c. Use smooth prose transitions between sections and subsections. Avoid abrupt jumps between topics — introduce each new concept with a sentence that connects it to what came before, so the notes read as a coherent narrative rather than a sequence of isolated facts.
 
 STRUCTURE RULES:
 8. Organise content into logical \\section{} and \\subsection{} following the natural flow of the lecture.
@@ -165,6 +166,7 @@ def _build_prompt(
     figures: list[dict] = None,
 ) -> str:
     prompt = f"""Convert the following lecture transcript into complete, comprehensive LaTeX notes.
+Write with a bookish, refined academic style — not a transcript dump, but polished notes a student would enjoy reading.
 Cover EVERY topic discussed — do not skip or summarise any part of the lecture.
 
 Course: {course_name}
