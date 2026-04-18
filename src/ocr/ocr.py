@@ -43,17 +43,17 @@ def extract_frames(
 
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    duration_sec = total_frames / fps
+    duration_sec = total_frames / fps if fps > 0 else 0
 
     console.print(f"\n[bold cyan]── Frame Extraction ────────────────────────────[/bold cyan]")
     console.print(f"Duration: {duration_sec/60:.1f} min  |  FPS: {fps:.1f}  |  Interval: {interval_sec}s")
 
-    frame_step = int(fps * interval_sec)
+    frame_step = max(1, int(fps * interval_sec))
     frames_out: list[tuple[float, Path]] = []
     prev_hist = None
 
     frame_idx = 0
-    while True:
+    while frame_idx < total_frames:
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = cap.read()
         if not ret:

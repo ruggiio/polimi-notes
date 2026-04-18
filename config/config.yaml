@@ -20,7 +20,7 @@ transcription:
 ocr:
   enabled: true
   frame_interval_sec: 10
-  scene_change_threshold: 0.15
+  scene_change_threshold: 0.35
   output_dir: "output/frames"
   languages: ["it", "en"]
   gpu: true

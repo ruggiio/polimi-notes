@@ -53,7 +53,7 @@ LATEX OUTPUT RULES:
 19. Begin with \\documentclass{article} and end with \\end{document}.
 20. Use only these standard packages: amsmath, amssymb, amsthm, geometry, graphicx, inputenc, enumitem. Never use custom \\usepackage{preamble}.
 21. Always include \\usepackage[utf8]{inputenc} and \\usepackage{enumitem} in the preamble.
-22. Define \\newtheorem for: theorem, definition, lemma, example, remark.
+22. Define \\newtheorem for: theorem, definition, lemma, example, remark, corollary. Never use any other theorem-like environment.
 23. Always wrap \\begin{cases} inside math mode: use \\[ \\begin{cases}...\\end{cases} \\] or $\\begin{cases}...\\end{cases}$ — never use \\begin{cases} outside math mode.
 24. Never use Unicode subscripts or superscripts (₁₂₃⁰¹²) — always use LaTeX math notation: $\\text{Ni}_3\\text{Ti}$, $\\text{Fe}_2\\text{Mo}$, $\\text{CO}_2$.
 """
@@ -207,6 +207,7 @@ Insert each figure near the section where the corresponding topic is discussed (
                 f"[{mins:02d}:{secs:02d}] latex_path={fig['latex_path']} "
                 f"caption={fig['caption']}\n"
             )
+        prompt += "\nCRITICAL: Use ONLY the exact latex_path values listed above. Never invent or modify figure filenames.\n"
 
     if rag_context:
         prompt += f"""
