@@ -211,9 +211,21 @@ Insert each figure near the section where the corresponding topic is discussed (
 
     if rag_context:
         prompt += f"""
---- CONTEXT FROM PREVIOUS LECTURES IN THIS COURSE ---
-(Use this context to maintain consistency with terminology, notation, and concepts
-introduced in previous lectures. Reference prior material where appropriate.)
+--- CONTEXT FROM COURSE MATERIAL (handouts and previous lectures) ---
+(Use this to maintain consistency with terminology, notation, and concepts.
+Reference prior material where appropriate.
+
+IMPORTANT — FIGURES: If the context contains a marker like [FIGURE: output/rag/figures/X.png],
+a figure image exists at that path. Include it in the LaTeX notes near the relevant topic:
+
+\\begin{{figure}}[h]
+\\centering
+\\includegraphics[width=0.75\\textwidth]{{../rag/figures/X.png}}
+\\caption{{Description of what the figure shows}}
+\\end{{figure}}
+
+Path conversion: "output/rag/figures/X.png" → "../rag/figures/X.png"
+(pdflatex runs from output/latex/, so the relative path climbs one level).)
 {rag_context}
 """
 
@@ -593,6 +605,79 @@ def _auto_fix_latex(
         return None
 
 
+def _repair_figure_paths(latex: str, output_dir: Path) -> str:
+    """Make every ``\\includegraphics{../rag/figures/...}`` reference resolvable.
+
+    Two failure modes are handled, both of which make pdflatex silently fall
+    back to its *draft* setting (a boxed path instead of the image) while still
+    returning 0, so the auto-fix path never fires and the broken figure ships:
+
+    1. The LLM alters the filename when copying it out of the RAG markers — most
+       often collapsing a run of spaces to one — so the named file is missing.
+    2. Even with the exact name, TeX's input tokenizer collapses *consecutive*
+       spaces to a single space, so a file whose name contains two spaces (e.g.
+       a source PDF "... Force Fields  Stability ...") can never be addressed by
+       ``\\includegraphics`` at all — TeX asks the OS for the single-space name,
+       which does not exist.
+
+    For each ``rag/figures`` reference we locate the real source file (exact
+    match, else a whitespace-normalised, case-insensitive match). If that name
+    cannot be expressed verbatim in TeX (it contains consecutive spaces) we
+    materialise a TeX-safe copy beside it and point the reference there. Single
+    spaces survive tokenisation and are left as-is; non-rag paths and
+    already-correct references are untouched.
+    """
+    import shutil
+
+    figures_dir = output_dir / "rag" / "figures"
+    if not figures_dir.is_dir():
+        return latex
+
+    def _norm(name: str) -> str:
+        return re.sub(r"\s+", " ", name).strip().lower()
+
+    def _safe(name: str) -> str:
+        return re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+
+    real_by_norm: dict[str, str] = {}
+    for p in figures_dir.iterdir():
+        if p.is_file():
+            real_by_norm.setdefault(_norm(p.name), p.name)
+
+    pattern = re.compile(r"(\\includegraphics(?:\[[^\]]*\])?\{)([^}]*)(\})")
+    fixed: list[str] = []
+
+    def _fix(m: "re.Match") -> str:
+        head, path, tail = m.group(1), m.group(2), m.group(3)
+        if "rag/figures/" not in path:
+            return m.group(0)
+        fname = path.rsplit("/", 1)[-1]
+        real = fname if (figures_dir / fname).exists() else real_by_norm.get(_norm(fname))
+        if not real:
+            return m.group(0)
+        if re.search(r"\s{2,}", real):
+            target = _safe(real)
+            if not (figures_dir / target).exists():
+                try:
+                    shutil.copyfile(figures_dir / real, figures_dir / target)
+                except OSError:
+                    return m.group(0)
+        else:
+            target = real
+        if target == fname:
+            return m.group(0)  # already correct and TeX-safe
+        dirpart = path[: len(path) - len(fname)]
+        fixed.append(target)
+        return f"{head}{dirpart}{target}{tail}"
+
+    out = pattern.sub(_fix, latex)
+    if fixed:
+        console.print(
+            f"[cyan]  Made {len(fixed)} figure path(s) TeX-safe so they embed correctly[/cyan]"
+        )
+    return out
+
+
 def compile_pdf(
     tex_path: Path,
     pdf_output_dir: Path,
@@ -801,6 +886,10 @@ def generate_notes(
             )
             latex_sections.append(_clean_latex(raw))
         final_latex = _merge_latex_chunks(latex_sections)
+
+    # Repair figure paths that the LLM may have mangled (whitespace, etc.)
+    # so pdflatex actually embeds them instead of silently using draft mode.
+    final_latex = _repair_figure_paths(final_latex, output_dir)
 
     # Always save .tex to output/latex/ (overwritten each time)
     tex_path = output_dir / "lecture_notes.tex"

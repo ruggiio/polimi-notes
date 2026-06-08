@@ -502,5 +502,345 @@ def index_course(
     ))
 
 
+@app.command(name="ingest")
+def ingest_command(
+    source: Path = typer.Argument(..., help="PDF file or directory to ingest"),
+    course: str = typer.Option(..., "--course", "-c", help="Course name"),
+    recursive: bool = typer.Option(False, "--recursive", "-r", help="Recurse into subdirectories"),
+    config_path: Path = typer.Option(CONFIG_PATH, "--config"),
+):
+    """Ingest PDFs (text only, pdfplumber) into the RAG database."""
+    cfg = load_config(config_path)
+    rag = _init_rag(cfg)
+    if rag is None:
+        console.print("[red]Failed to initialize RAG. Set rag.enabled: true in config.[/red]")
+        raise typer.Exit(1)
+
+    if source.is_dir():
+        pattern = "**/*.pdf" if recursive else "*.pdf"
+        pdfs = sorted(source.glob(pattern))
+    else:
+        pdfs = [source]
+
+    if not pdfs:
+        console.print(f"[yellow]No PDFs found in {source}[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(f"[cyan]Ingesting {len(pdfs)} PDF(s) for '{course}'...[/cyan]")
+    total = 0
+    for p in pdfs:
+        chunks = rag.add_from_pdf(p, course)
+        total += chunks
+        console.print(f"  [dim]{p.name}:[/dim] {chunks} chunks")
+
+    console.print(Panel.fit(
+        f"[bold green]✓ Ingested {len(pdfs)} PDFs ({total} chunks) for '{course}'[/bold green]",
+        border_style="green",
+    ))
+
+
+@app.command(name="ingest-pdf")
+def ingest_pdf_command(
+    source: Path = typer.Argument(..., help="PDF file or directory to ingest"),
+    course: str = typer.Option(..., "--course", "-c", help="Course name"),
+    recursive: bool = typer.Option(False, "--recursive", "-r", help="Recurse into subdirectories"),
+    figures_dir: Path = typer.Option(None, "--figures-dir", help="Where to save extracted figure PNGs"),
+    gemini_model: str = typer.Option("gemini-2.0-flash-lite", "--gemini-model"),
+    handwritten: bool = typer.Option(False, "--handwritten", help="Use Gemini Vision to transcribe handwritten/scanned PDFs instead of Marker"),
+    figures_only: bool = typer.Option(False, "--figures-only", help="Skip text extraction, only run Gemini figure detection"),
+    config_path: Path = typer.Option(CONFIG_PATH, "--config"),
+):
+    """Ingest PDFs with Marker (formulas) + Gemini figure extraction into RAG. Use --handwritten for scanned/handwritten notes. Use --figures-only to extract figures without re-doing text."""
+    cfg = load_config(config_path)
+    rag = _init_rag(cfg)
+    if rag is None:
+        console.print("[red]Failed to initialize RAG. Set rag.enabled: true in config.[/red]")
+        raise typer.Exit(1)
+
+    if figures_dir is None:
+        figures_dir = Path(cfg.get("rag", {}).get("db_path", "output/rag")) / "figures"
+
+    gemini_key = os.environ.get("GEMINI_API_KEY", "") or cfg.get("gemini", {}).get("api_key", "")
+    gemini_model_name = cfg.get("gemini", {}).get("model", gemini_model)
+
+    from src.ingest.pdf_ingestor import ingest_pdf
+
+    if source.is_dir():
+        pattern = "**/*.pdf" if recursive else "*.pdf"
+        pdfs = sorted(source.glob(pattern))
+    else:
+        pdfs = [source]
+
+    if not pdfs:
+        console.print(f"[yellow]No PDFs found in {source}[/yellow]")
+        raise typer.Exit(0)
+
+    if handwritten:
+        mode_label = "Gemini Vision (handwritten)"
+    elif figures_only:
+        mode_label = "Gemini figure detection only"
+    else:
+        mode_label = "Marker + Gemini"
+    console.print(f"[cyan]Ingesting {len(pdfs)} PDF(s) with {mode_label} for '{course}'...[/cyan]")
+    total_chunks = 0
+    total_figures = 0
+    for p in pdfs:
+        result = ingest_pdf(
+            pdf_path=p,
+            course_name=course,
+            rag=rag,
+            figures_dir=figures_dir,
+            gemini_api_key=gemini_key,
+            gemini_model=gemini_model_name,
+            handwritten=handwritten,
+            figures_only=figures_only,
+        )
+        total_chunks += result["text_chunks"]
+        total_figures += result["figures"]
+
+    console.print(Panel.fit(
+        f"[bold green]✓ Ingest complete![/bold green]\n"
+        f"  PDFs: {len(pdfs)}\n"
+        f"  Text chunks: {total_chunks}\n"
+        f"  Figures saved: {total_figures}\n"
+        f"  Figures dir: {figures_dir}",
+        border_style="green",
+    ))
+
+
+@app.command(name="rag-status")
+def rag_status_command(
+    course: str = typer.Option(None, "--course", "-c", help="Filter by course name"),
+    config_path: Path = typer.Option(CONFIG_PATH, "--config"),
+):
+    """Show RAG database chunk counts per course."""
+    cfg = load_config(config_path)
+    rag_cfg = cfg.get("rag", {})
+    db_path = Path(rag_cfg.get("db_path", "output/rag"))
+
+    try:
+        import chromadb
+        client = chromadb.PersistentClient(path=str(db_path))
+        collections = client.list_collections()
+    except Exception as e:
+        console.print(f"[red]Failed to read RAG database: {e}[/red]")
+        raise typer.Exit(1)
+
+    if not collections:
+        console.print("[yellow]RAG database is empty.[/yellow]")
+        return
+
+    console.print(f"\n[bold]RAG Status[/bold] — {db_path}\n")
+    for col in collections:
+        name = col.name if hasattr(col, "name") else str(col)
+        if course and course.lower().replace(" ", "_") not in name:
+            continue
+        try:
+            count = col.count()
+            console.print(f"  [cyan]{name}[/cyan]: {count} chunks")
+        except Exception:
+            console.print(f"  [cyan]{name}[/cyan]: (error)")
+
+
+@app.command(name="batch-run")
+def batch_run_command(
+    registrazioni_url: str = typer.Argument(..., help="URL of PoliMi registrazioni page"),
+    course: str = typer.Option(..., "--course", "-c", help="Course name"),
+    no_ocr: bool = typer.Option(True, "--no-ocr/--ocr", help="Skip OCR (recommended for lecture recordings)"),
+    headless: bool = typer.Option(False, "--headless/--headed", help="Run browser headless (not recommended)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Only list lectures without downloading"),
+    skip_existing: bool = typer.Option(True, "--skip-existing/--no-skip", help="Skip lectures with existing PDF"),
+    limit: int = typer.Option(None, "--limit", "-n", help="Process only first N lectures"),
+    config_path: Path = typer.Option(CONFIG_PATH, "--config"),
+):
+    """
+    [bold green]Batch pipeline:[/bold green] Scrape PoliMi registrazioni page → download each lecture → notes PDF.
+    Login is manual: a browser opens, you complete SSO once, then all lectures are processed automatically.
+    """
+    from src.downloader.batch_scraper import scrape_registrazioni
+    from src.downloader.downloader import download_lecture
+    from src.transcriber.transcriber import transcribe, get_device
+    from src.notes_gen.notes_gen import generate_notes
+
+    cfg = load_config(config_path)
+    cookies_file = Path(cfg["download"]["cookies_file"])
+    pdf_output_dir = Path(cfg["notes"]["latex"].get("pdf_output_dir", "output/notes"))
+
+    # ── Step 1: Scrape lecture list ───────────────────────────────────────────
+    console.print(Rule("[bold]Step 1: Scraping lecture list[/bold]"))
+    entries = scrape_registrazioni(registrazioni_url, cookies_file)
+
+    if not entries:
+        console.print("[red]No lectures found on the page.[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"\n[bold]Found {len(entries)} lectures:[/bold]")
+    for i, e in enumerate(entries):
+        console.print(f"  {i + 1:2d}. [cyan]{e['date']}[/cyan] — {e['topic'][:70]}")
+
+    if dry_run:
+        console.print("\n[yellow]--dry-run: stopping here. No downloads.[/yellow]")
+        return
+
+    if limit:
+        entries = entries[:limit]
+        console.print(f"\n[dim]Limited to first {limit} lectures[/dim]")
+
+    typer.confirm(f"\nProcess {len(entries)} lectures?", abort=True)
+
+    # ── Step 2: Process each lecture ─────────────────────────────────────────
+    username, password = get_credentials(cfg)
+    rag = _init_rag(cfg)
+    tcfg = cfg["transcription"]
+    ncfg = cfg["notes"]
+    rag_cfg = cfg.get("rag", {})
+
+    succeeded, skipped, failed = 0, 0, 0
+
+    for i, entry in enumerate(entries):
+        console.print(Rule(f"[bold]Lecture {i + 1}/{len(entries)}: {entry['date']}[/bold]"))
+        console.print(f"[dim]{entry['topic'][:90]}[/dim]")
+
+        # Skip if a PDF with this date already exists
+        if skip_existing:
+            existing_pdfs = list(pdf_output_dir.glob(f"*{entry['date']}*.pdf"))
+            if existing_pdfs:
+                console.print(f"[dim]  PDF already exists ({existing_pdfs[0].name}), skipping[/dim]")
+                skipped += 1
+                continue
+
+        try:
+            # Download
+            video_path, extracted_date = download_lecture(
+                webex_url=entry["webex_url"],
+                username=username,
+                password=password,
+                output_dir=Path(cfg["download"]["output_dir"]),
+                cookies_file=cookies_file,
+                headless=headless,
+            )
+            lecture_date = extracted_date or entry["date"]
+
+            # Transcribe
+            device = get_device() if tcfg["device"] == "cuda" else "cpu"
+            transcript_result = transcribe(
+                video_path=video_path,
+                output_dir=Path(tcfg["output_dir"]),
+                model_name=tcfg["model"],
+                language=tcfg.get("language"),
+                device=device,
+            )
+
+            # Build merged_data (no OCR in batch mode by default)
+            merged_data = [
+                {"timestamp_sec": s["start"], "speech": s["text"], "ocr_text": "", "is_slide": False}
+                for s in transcript_result["segments"]
+            ]
+
+            # RAG context
+            rag_context = None
+            if rag and rag.course_exists(course):
+                query_text = " ".join(transcript_result["text"].split()[:200])
+                rag_context = rag.query_context(
+                    query_text=query_text,
+                    course_name=course,
+                    n_results=rag_cfg.get("n_results", 5),
+                )
+
+            # Generate notes — use topic as suffix for the PDF filename
+            active_backend = ncfg["backend"]
+            backend_config = {
+                **ncfg.get(active_backend, {}),
+                "use_tools": ncfg.get("use_tools", False),
+                "auto_fix_latex": ncfg.get("auto_fix_latex", False),
+            }
+            generate_notes(
+                merged_data=merged_data,
+                output_dir=Path(ncfg["latex"]["output_dir"]),
+                stem=video_path.stem,
+                course_name=course,
+                lecture_date=lecture_date,
+                backend=active_backend,
+                backend_config=backend_config,
+                compile_pdf_flag=ncfg["latex"]["compile_pdf"],
+                transcript_path=transcript_result["txt_path"],
+                pdf_output_dir=pdf_output_dir,
+                suffix=entry["topic"][:60] if entry.get("topic") else None,
+                rag_context=rag_context,
+            )
+
+            # Index in RAG
+            if rag:
+                rag.add_lecture(transcript_result["text"], course, lecture_date)
+
+            # Delete video
+            _cleanup_video(video_path)
+            succeeded += 1
+
+        except Exception as exc:
+            console.print(f"[red]  Error: {exc}[/red]")
+            console.print("[yellow]  Continuing to next lecture...[/yellow]")
+            failed += 1
+
+    console.print(Panel.fit(
+        f"[bold green]✓ Batch complete![/bold green]\n\n"
+        f"  Processed : {succeeded}\n"
+        f"  Skipped   : {skipped}\n"
+        f"  Failed    : {failed}\n"
+        f"  PDFs      : {pdf_output_dir}/",
+        border_style="green",
+    ))
+
+
+@app.command(name="rag-clear")
+def rag_clear_command(
+    course: str = typer.Option(None, "--course", "-c", help="Course name to clear (omit to clear ALL)"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    config_path: Path = typer.Option(CONFIG_PATH, "--config"),
+):
+    """Delete RAG chunks for a course (or the entire database)."""
+    cfg = load_config(config_path)
+    db_path = Path(cfg.get("rag", {}).get("db_path", "output/rag"))
+
+    try:
+        import chromadb
+        client = chromadb.PersistentClient(path=str(db_path))
+        collections = client.list_collections()
+    except Exception as e:
+        console.print(f"[red]Failed to read RAG database: {e}[/red]")
+        raise typer.Exit(1)
+
+    if not collections:
+        console.print("[yellow]RAG database is already empty.[/yellow]")
+        return
+
+    if course:
+        safe = course.lower().replace(" ", "_").replace("-", "_")
+        safe = "".join(c for c in safe if c.isalnum() or c == "_")
+        targets = [col for col in collections if col.name == safe]
+        if not targets:
+            console.print(f"[yellow]No collection found for '{course}' (looked for '{safe}').[/yellow]")
+            console.print("Available collections:")
+            for col in collections:
+                console.print(f"  [cyan]{col.name}[/cyan] ({col.count()} chunks)")
+            raise typer.Exit(1)
+    else:
+        targets = list(collections)
+
+    names = [col.name for col in targets]
+    if not yes:
+        console.print(f"[bold red]About to delete:[/bold red] {', '.join(names)}")
+        typer.confirm("Are you sure?", abort=True)
+
+    for col in targets:
+        client.delete_collection(col.name)
+        console.print(f"[green]✓ Deleted collection:[/green] {col.name}")
+
+    console.print(Panel.fit(
+        f"[bold green]✓ RAG cleared:[/bold green] {', '.join(names)}",
+        border_style="green",
+    ))
+
+
 if __name__ == "__main__":
     app()

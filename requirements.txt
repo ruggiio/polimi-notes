@@ -10,7 +10,7 @@ yt-dlp>=2024.1.1
 requests>=2.31
 
 # Transcription
-openai-whisper>=20231117
+faster-whisper>=1.0
 torch>=2.1.0          # Install CUDA version separately — see README
 numpy>=1.24
 
