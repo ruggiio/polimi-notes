@@ -35,9 +35,9 @@ notes:
   auto_fix_latex: true      # true = auto-retry LaTeX compilation with LLM error fixing
 
   claude:
-    model: "claude-sonnet-4-20250514"
+    model: "claude-sonnet-4-6"
     api_key: ""          # Or set env var ANTHROPIC_API_KEY
-    max_tokens: 32000
+    max_tokens: 64000
 
   ollama:
     model: "mistral"
@@ -55,7 +55,7 @@ notes:
 
 figures:
   enabled: true           # Set to true to enable Claude Vision figure extraction
-  model: "claude-sonnet-4-20250514"
+  model: "claude-sonnet-4-6"
   api_key: ""              # Uses ANTHROPIC_API_KEY env var if empty
   max_candidates: 30       # Max frames to analyze with Vision API (cost control)
   complexity_threshold: 0.05  # Min visual complexity score to be a candidate

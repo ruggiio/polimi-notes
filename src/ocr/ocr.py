@@ -180,7 +180,7 @@ def run_ocr(
             try:
                 import anthropic
                 vision_client = anthropic.Anthropic(api_key=api_key)
-                vision_model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+                vision_model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
                 console.print("[cyan]Vision OCR enabled for handwriting/blackboard frames[/cyan]")
             except ImportError:
                 console.print("[yellow]⚠ anthropic package not installed — falling back to EasyOCR for all frames[/yellow]")

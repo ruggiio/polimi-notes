@@ -324,13 +324,13 @@ def ingest_pdf(
     handwritten: bool = False,
     figures_only: bool = False,
     anthropic_api_key: str = "",
-    anthropic_model: str = "claude-sonnet-4-20250514",
+    anthropic_model: str = "claude-sonnet-4-6",
 ) -> dict:
     label = " [handwritten]" if handwritten else " [figures only]" if figures_only else ""
     console.print(f"\n[bold cyan]Ingesting:[/bold cyan] {pdf_path.name}{label}")
     figures_dir.mkdir(parents=True, exist_ok=True)
     anthropic_api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-    anthropic_model = anthropic_model or os.environ.get("ANTHROPIC_MODEL", "") or "claude-sonnet-4-20250514"
+    anthropic_model = anthropic_model or os.environ.get("ANTHROPIC_MODEL", "") or "claude-sonnet-4-6"
     force = os.environ.get("ANTHROPIC_FORCE", "") == "1"
     text_chunks = 0
 

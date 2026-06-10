@@ -185,7 +185,7 @@ def _analyze_frame_with_vision(
     timestamp: float,
     nearby_transcript: str,
     client: anthropic.Anthropic,
-    model: str = "claude-sonnet-4-20250514",
+    model: str = "claude-sonnet-4-6",
 ) -> dict | None:
     """Send a processed frame to Claude Vision API for analysis."""
     try:
@@ -238,7 +238,7 @@ def extract_figures(
     merged_data: list[dict],
     figures_output_dir: Path,
     api_key: str = "",
-    model: str = "claude-sonnet-4-20250514",
+    model: str = "claude-sonnet-4-6",
     complexity_threshold: float = 0.05,
     max_candidates: int = 30,
 ) -> list[dict]:

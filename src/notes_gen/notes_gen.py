@@ -395,6 +395,7 @@ def _generate_claude(
                 "system": SYSTEM_PROMPT,
                 "messages": messages,
                 "tools": TOOL_DEFINITIONS,
+                "thinking": {"type": "adaptive"},
                 "timeout": httpx.Timeout(timeout=900.0, connect=30.0),
             }
             response = client.messages.create(**kwargs)
@@ -441,6 +442,7 @@ def _generate_claude(
             model=model,
             max_tokens=max_tokens,
             system=SYSTEM_PROMPT,
+            thinking={"type": "adaptive"},
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
             for text in stream.text_stream:
@@ -493,7 +495,7 @@ def _call_backend(
     if backend == "claude":
         return _generate_claude(
             prompt,
-            model=cfg.get("model", "claude-sonnet-4-20250514"),
+            model=cfg.get("model", "claude-sonnet-4-6"),
             api_key=cfg.get("api_key", ""),
             max_tokens=cfg.get("max_tokens", 16000),
             use_tools=use_tools,
@@ -575,13 +577,18 @@ def _auto_fix_latex(
             if not key:
                 return None
             client = anthropic.Anthropic(api_key=key)
-            response = client.messages.create(
-                model=cfg.get("model", "claude-sonnet-4-20250514"),
+            # Streaming: a full corrected .tex can exceed what a non-streaming
+            # request can return before the SDK's HTTP timeout.
+            fixed = ""
+            with client.messages.stream(
+                model=cfg.get("model", "claude-sonnet-4-6"),
                 max_tokens=cfg.get("max_tokens", 16000),
                 system="You are a LaTeX expert. Fix the compilation errors and return the complete corrected .tex file. Output ONLY the LaTeX code, nothing else.",
                 messages=[{"role": "user", "content": fix_prompt}],
-            )
-            return _clean_latex(response.content[0].text)
+            ) as stream:
+                for text in stream.text_stream:
+                    fixed += text
+            return _clean_latex(fixed)
         elif backend == "openai":
             from openai import OpenAI
             key = cfg.get("api_key", "") or os.environ.get("OPENAI_API_KEY", "")
@@ -844,7 +851,10 @@ def generate_notes(
                   f"{len(filtered_ocr.splitlines()) if filtered_ocr else 0} unique math expressions")
 
     # ── Generate notes ────────────────────────────────────────────────────────
-    MAX_WORDS_PER_CHUNK = 18000
+    # claude-sonnet-4-6 has a 1M-token context window: an entire lecture fits
+    # in a single call, so chunking (and the lossy chunk merge) only kicks in
+    # for pathologically long transcripts.
+    MAX_WORDS_PER_CHUNK = 150000
     words = full_transcript.split()
 
     if len(words) <= MAX_WORDS_PER_CHUNK:
