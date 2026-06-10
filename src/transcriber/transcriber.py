@@ -6,6 +6,7 @@ Outputs both a plain .txt and a timestamped .json for alignment with OCR frames.
 """
 
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -70,8 +71,15 @@ def transcribe(
 
     if initial_prompt is None:
         try:
-            from src.course_profiles import extract_glossary, find_profile_for_file
-            initial_prompt = extract_glossary(find_profile_for_file(stem)) or None
+            from src.course_profiles import (
+                extract_glossary, find_profile_for_file, load_profile,
+            )
+            # POLIMI_COURSE (set e.g. by the Colab notebook) beats the
+            # filename heuristic, since video names rarely contain the
+            # full course name.
+            course = os.environ.get("POLIMI_COURSE", "")
+            profile = load_profile(course) if course else find_profile_for_file(stem)
+            initial_prompt = extract_glossary(profile) or None
         except Exception:
             initial_prompt = None
 

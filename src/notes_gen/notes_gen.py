@@ -980,6 +980,18 @@ def generate_notes(
     tex_path.write_text(final_latex, encoding="utf-8")
     console.print(f"[green]✓ LaTeX saved:[/green] {tex_path}")
 
+    # Archive a per-lecture copy so course_builder can later assemble the
+    # whole course into a single cohesive PDF.
+    try:
+        from src.course_profiles import _slugify
+        course_dir = Path("output/course") / _slugify(course_name)
+        course_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = course_dir / f"{lecture_date}_{stem}.tex"
+        archive_path.write_text(final_latex, encoding="utf-8")
+        console.print(f"[dim]Archived for course build: {archive_path}[/dim]")
+    except Exception as e:
+        console.print(f"[yellow]⚠ Course archive failed: {e}[/yellow]")
+
     if compile_pdf_flag:
         compile_pdf(
             tex_path, pdf_output_dir, course_name, lecture_date, suffix,

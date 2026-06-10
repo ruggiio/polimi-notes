@@ -29,6 +29,11 @@ ocr:
   vision_for_handwriting: false  # true = use Claude Vision for handwritten/blackboard frames
                                   # requires ANTHROPIC_API_KEY env var
 
+# Course mode: every lecture's .tex is archived automatically in
+# output/course/<course-slug>/. To work per-course without per-lecture PDFs,
+# set latex.compile_pdf: false below; when the course is over, build the
+# single cohesive PDF with:  python -m src.course_builder "Course Name"
+# (add --no-polish to skip the Claude cohesion pass between chapters)
 notes:
   backend: "claude"
   use_tools: false          # true = enable Claude tool use for transcript/OCR/figure lookup
