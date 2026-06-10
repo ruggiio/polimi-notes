@@ -166,6 +166,7 @@ def _build_prompt(
     lecture_date: str,
     figures: list[dict] = None,
     rag_context: str = None,
+    course_profile: str = None,
 ) -> str:
     prompt = f"""Convert the following lecture transcript into complete, comprehensive LaTeX notes.
 Write with a bookish, refined academic style — not a transcript dump, but polished notes a student would enjoy reading.
@@ -227,6 +228,14 @@ a figure image exists at that path. Include it in the LaTeX notes near the relev
 Path conversion: "output/rag/figures/X.png" → "../rag/figures/X.png"
 (pdflatex runs from output/latex/, so the relative path climbs one level).)
 {rag_context}
+"""
+
+    if course_profile:
+        prompt += f"""
+--- COURSE STYLE GUIDE ---
+(Terminology, notation and LaTeX conventions for this course.
+Follow them strictly so notation stays consistent across all lectures.)
+{course_profile}
 """
 
     prompt += "\nProduce the complete .tex file now, covering the entire lecture:"
@@ -857,11 +866,20 @@ def generate_notes(
     MAX_WORDS_PER_CHUNK = 150000
     words = full_transcript.split()
 
+    # Per-course style guide (terminology, notation, LaTeX conventions)
+    try:
+        from src.course_profiles import load_profile
+        course_profile = load_profile(course_name)
+    except Exception:
+        course_profile = ""
+    if course_profile:
+        console.print(f"[dim]Course profile loaded for '{course_name}'[/dim]")
+
     if len(words) <= MAX_WORDS_PER_CHUNK:
         console.print(f"  Chunk 1/1...")
         prompt = _build_prompt(
             full_transcript, filtered_ocr, course_name, lecture_date,
-            figures, rag_context,
+            figures, rag_context, course_profile,
         )
         raw = _call_backend(
             prompt, backend, cfg,
@@ -878,7 +896,8 @@ def generate_notes(
         for i, chunk_words in enumerate(chunks):
             console.print(f"  Chunk {i+1}/{len(chunks)}...")
             chunk_text = " ".join(chunk_words)
-            # Only pass figures and RAG context to first chunk
+            # Only pass figures and RAG context to first chunk; the course
+            # profile goes to every chunk to keep notation consistent.
             prompt = _build_prompt(
                 chunk_text,
                 filtered_ocr if i == 0 else "",
@@ -886,6 +905,7 @@ def generate_notes(
                 lecture_date,
                 figures if i == 0 else None,
                 rag_context if i == 0 else None,
+                course_profile,
             )
             raw = _call_backend(
                 prompt, backend, cfg,

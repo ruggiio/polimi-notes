@@ -45,16 +45,20 @@ def transcribe(
     model_name: str = "large-v3",
     language: str | None = None,
     device: str = "cuda",
+    initial_prompt: str | None = None,
 ) -> dict:
     """
     Transcribe the audio track of a video file using faster-whisper.
 
     Args:
-        video_path:  Path to the .mp4 (or any audio/video) file
-        output_dir:  Where to write transcript files
-        model_name:  Whisper model size
-        language:    Force language (e.g. "it", "en") or None for auto
-        device:      "cuda" or "cpu"
+        video_path:     Path to the .mp4 (or any audio/video) file
+        output_dir:     Where to write transcript files
+        model_name:     Whisper model size
+        language:       Force language (e.g. "it", "en") or None for auto
+        device:         "cuda" or "cpu"
+        initial_prompt: Domain terms to anchor recognition. When None, the
+                        "## Glossario" of the matching course profile in
+                        config/courses/ is used (matched on the filename).
 
     Returns:
         dict with keys: 'text', 'segments', 'language', 'txt_path', 'json_path'
@@ -64,10 +68,19 @@ def transcribe(
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = video_path.stem
 
+    if initial_prompt is None:
+        try:
+            from src.course_profiles import extract_glossary, find_profile_for_file
+            initial_prompt = extract_glossary(find_profile_for_file(stem)) or None
+        except Exception:
+            initial_prompt = None
+
     console.print(f"\n[bold cyan]\u2500\u2500 Transcription \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500[/bold cyan]")
     console.print(f"Model:    [yellow]{model_name}[/yellow]")
     console.print(f"Device:   [yellow]{device}[/yellow]")
     console.print(f"File:     {video_path.name}")
+    if initial_prompt:
+        console.print(f"Glossary: [dim]{initial_prompt[:80]}{'...' if len(initial_prompt) > 80 else ''}[/dim]")
 
     # Load model — float16 is fastest on modern GPUs; fall back to int8_float16
     console.print(f"[dim]Loading faster-whisper model '{model_name}'...[/dim]")
@@ -89,6 +102,7 @@ def transcribe(
     segments_gen, info = model.transcribe(
         str(video_path),
         language=language,
+        initial_prompt=initial_prompt,
         beam_size=2,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 500},
