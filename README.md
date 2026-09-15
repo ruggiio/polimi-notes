@@ -347,3 +347,88 @@ Per lecture (1.5h) with default settings (`claude` backend, figures enabled):
 ## License
 
 MIT — personal use only. Respect Politecnico di Milano's terms of service regarding lecture recordings.
+---
+
+## Automazione notturna (Linux) — download, trascrizione e appunti senza interazione
+
+Verificato su Ubuntu con RTX A2000 4 GB (settembre 2026). Tre stadi idempotenti, ognuno fa solo ciò che manca su disco:
+
+```
+Archivio registrazioni PoliMi ──fetch──▶ output/videos/*.mp4 ──transcribe──▶ output/transcripts/*.txt ──notes──▶ output/notes/*.pdf
+```
+
+### Come funziona il login (nessuna password nello script)
+
+- La 2FA PoliMi (CIE ID) non è automatizzabile, ma **non serve**: con "resta connesso" la sessione dura **10 giorni** e vive in un profilo Chromium persistente (`config/chrome_profile/`, gitignored).
+- Con quella sessione il job apre l'archivio in headless; Webex chiede **solo l'email** (`POLIMI_EMAIL`, quella dichiarata dall'IdP, es. `nome.cognome@mail.polimi.it`) e l'IdP rilascia l'asserzione SAML senza password né 2FA.
+- Quando la sessione scade il job esce con codice 3, manda una notifica desktop e salta solo lo stadio fetch. Rinnovo (una finestra, tu fai password + CIE):
+
+```bash
+.venv/bin/python tools/sso_login.py
+```
+
+### Setup
+
+```bash
+python3.12 -m venv .venv          # faster-whisper non richiede torch
+.venv/bin/pip install playwright python-dotenv requests rich pyyaml typer faster-whisper nvidia-cublas-cu12 nvidia-cudnn-cu12
+.venv/bin/playwright install chromium
+cp .env.example .env               # POLIMI_USER, POLIMI_EMAIL, POLIMI_PASS
+.venv/bin/python tools/sso_login.py
+tools/install_timer.sh             # timer systemd --user, ogni notte alle 02:30 (recupera al risveglio)
+```
+
+Gli appunti vengono generati da **Claude Code** (`notes.backend: claude-code` → `claude -p`, abbonamento, nessuna API key), con lo stesso prompt del backend API. Per usare l'API imposta `backend: claude` e `ANTHROPIC_API_KEY`.
+
+### Configurazione (`config/config.yaml`, sezione `auto`)
+
+```yaml
+auto:
+  courses:
+    - name: "BIOINSPIRED ROBOTICS"   # titolo note + scheda corso config/courses/<slug>.md
+      match: "BIOINSPIRED"           # filtro "Corso" dell'archivio (nome o codice)
+      # aa: 2025                     # A.A. di inizio; omesso = corrente
+  kind: null                          # null = tutte le forme didattiche
+  keep_videos: true
+```
+
+### Uso manuale
+
+```bash
+.venv/bin/python tools/fetch_lecture.py --aa 2025 --course BIOINSPIRED --list   # elenco
+.venv/bin/python tools/fetch_lecture.py --aa 2025 --course BIOINSPIRED --pick oldest
+.venv/bin/python tools/nightly.py --dry-run                                       # piano
+.venv/bin/python tools/nightly.py --no-fetch --max-notes 1                        # solo trascrizione + 1 PDF
+systemctl --user start polimi-notes-nightly.service; tail -f output/auto/nightly.log
+```
+
+Stato e fallimenti in `output/auto/state.json` (uno stadio che fallisce 3 volte viene saltato). Sonda diagnostica del flusso SSO: `tools/sso_probe.py`.
+
+### Slide come supporto (WeBeep Sync)
+
+Se `auto.slides: true` e in `auto.slides_dir` (default `~/Documenti/WeBeep Sync`, la cartella di [WeBeep Sync](https://github.com/toto04/webeep-sync)) esiste una cartella con il nome del corso, il job cerca il PDF delle slide della lezione — punteggio = parole dell'argomento nel nome file/prima pagina + termini distintivi del deck presenti nella trascrizione; in caso di ambiguità non usa nulla — e lo estrae in `output/slides/<slug>/`:
+
+- **titoli e termini** → `initial_prompt` di Whisper (insieme al glossario della scheda corso);
+- **testo pagina per pagina** → nel prompt degli appunti, come autorità per termini, nomi, simboli e formule (la trascrizione resta la fonte di ciò che è stato detto);
+- **figure** (immagini raster sopra soglia, loghi ripetuti scartati, pagine vettoriali renderizzate) → elenco `[slide N] latex_path` che Claude inserisce dove servono, con didascalie contestuali; i riferimenti a file inesistenti vengono rimossi prima di compilare.
+
+Manuale: `python main.py notes-only transcript.txt --course "X" --date 2025-09-29 --slides slides.pdf --suffix "Argomento"`.
+
+Formati: PDF e PowerPoint (`.pptx/.ppt/.odp`, convertiti con LibreOffice in `output/slides/_converted/`, cache per data/dimensione).
+
+**Slide linkate (OneDrive/SharePoint).** Molti docenti mettono su WeBeep solo un modulo `url` verso una cartella OneDrive, che WeBeep Sync ignora. Elenca quei link in `auto.courses[].slides_links`: ogni notte (o con `tools/sync_slides.py --all`) il job apre il link con la sessione PoliMi, elenca la cartella via REST API e scarica i file nuovi/modificati in `<slides_dir>/<CORSO>/_links/…` (stato in `.onedrive_sync.json`, resume, limite `slides_max_mb`).
+
+**Triage delle figure.** Le immagini estratte da un pptx sono per metà sfondi, loghi, ritratti, screenshot. Con `slides_triage: true` un provino numerato viene mostrato a Haiku (tool Read, ~$0.05 per deck) che scarta le decorative e dà una didascalia descrittiva a ognuna delle altre; il modello che scrive gli appunti usa quelle didascalie per decidere dove inserirle.
+
+WeBeep Sync senza root: `dpkg-deb -x webeep-sync-debian.deb ~/.local/opt/webeep-sync`, wrapper in `~/.local/bin/webeep-sync` con `--no-sandbox`, launcher in `~/.local/share/applications/`.
+
+### Costi e modelli
+
+Ogni chiamata `claude -p` è registrata in `output/auto/usage.jsonl` (modello, token, costo equivalente, durata). Per confrontare i modelli sulla stessa lezione:
+
+```bash
+.venv/bin/python tools/compare_models.py output/transcripts/LEZIONE.txt --course "X" --date 2025-09-29 \
+    --topic "Argomento" --slides output/slides/<slug> --models sonnet opus haiku
+```
+
+Le chiamate batch usano `--strict-mcp-config` (nessun server MCP: ~14k token in meno per chiamata).
