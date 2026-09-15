@@ -11,6 +11,8 @@ import json
 import os
 import re
 import subprocess
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -18,7 +20,7 @@ from rich.console import Console
 
 console = Console()
 
-Backend = Literal["claude", "ollama", "openai"]
+Backend = Literal["claude", "claude-code", "ollama", "openai"]
 
 
 SYSTEM_PROMPT = """You are an expert academic note-taker and LaTeX typesetter for university-level engineering and science courses. Your task is to convert a raw lecture transcript (and optionally OCR-extracted slide/blackboard text) into complete, beautiful LaTeX lecture notes that read like a well-written textbook chapter: clear discursive prose as the backbone, with a few colored boxes that highlight the truly key items.
@@ -58,6 +60,7 @@ FIXED PREAMBLE — copy this VERBATIM at the top of the document, replacing only
 \\usepackage[utf8]{inputenc}
 \\usepackage[T1]{fontenc}
 \\usepackage{amsmath,amssymb,amsthm}
+\\usepackage{booktabs,array,multirow}
 \\usepackage[margin=2.5cm]{geometry}
 \\usepackage{graphicx}
 \\usepackage{enumitem}
@@ -221,6 +224,7 @@ def _build_prompt(
     figures: list[dict] = None,
     rag_context: str = None,
     course_profile: str = None,
+    slides_text: str = None,
 ) -> str:
     prompt = f"""Convert the following lecture transcript into complete, comprehensive LaTeX notes.
 Write with a bookish, refined academic style — not a transcript dump, but polished notes a student would enjoy reading.
@@ -239,6 +243,17 @@ Date: {lecture_date}
 Integrate them naturally into the notes where contextually appropriate.)
 {ocr_filtered}
 """
+    if slides_text:
+        prompt += f"""
+--- LECTURE SLIDES (text extracted page by page, in order) ---
+(The transcript is the primary source for WHAT was said; the slides are the authority for HOW it is
+written: use them to correct transcription errors in technical terms, proper names, symbols and
+formulas, to recover the exact wording of definitions, and to follow the professor's own structure.
+The deck may cover more, or other, material than this lecture: use ONLY the parts that correspond to
+what was actually said. Never add a section, topic or example that appears only in the slides.
+Do not turn the notes into a copy of the slides: keep the explanatory prose of the lecture.)
+{slides_text}
+"""
     if figures:
         prompt += """
 --- FIGURES TO INCLUDE ---
@@ -256,13 +271,18 @@ Insert each figure near the section where the corresponding topic is discussed (
 
 """
         for fig in figures:
-            mins = int(fig["timestamp"] // 60)
-            secs = int(fig["timestamp"] % 60)
-            prompt += (
-                f"[{mins:02d}:{secs:02d}] latex_path={fig['latex_path']} "
-                f"caption={fig['caption']}\n"
-            )
-        prompt += "\nCRITICAL: Use ONLY the exact latex_path values listed above. Never invent or modify figure filenames.\n"
+            if "slide" in fig:
+                where = f"[slide {fig['slide']}]"
+            else:
+                mins = int(fig["timestamp"] // 60)
+                secs = int(fig["timestamp"] % 60)
+                where = f"[{mins:02d}:{secs:02d}]"
+            prompt += f"{where} latex_path={fig['latex_path']} caption={fig['caption']}\n"
+        prompt += ("\nCRITICAL: Use ONLY the exact latex_path values listed above. Never invent or modify figure filenames. "
+                   f"These are CANDIDATES, not a list to include: use at most {max(1, len(figures) // 2)} of them, and a figure only "
+                   "where the transcript explicitly discusses what it shows (a diagram, plot, scheme, organism or device the "
+                   "professor talked about). When in doubt, leave it out; never justify a figure with a caption. "
+                   "Write a caption that explains what the figure shows in the context of the lecture, not the slide title.\n")
 
     if rag_context:
         prompt += f"""
@@ -515,6 +535,110 @@ def _generate_claude(
         return full_response
 
 
+# ── Claude Code CLI backend ──────────────────────────────────────────────────
+# Runs `claude -p` headless: same SYSTEM_PROMPT and prompt as the API backend,
+# but billed to the Claude subscription instead of an API key. No tools are
+# exposed, so it is a pure text-generation call.
+
+_CLAUDE_SESSION_VARS = (
+    "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ATTENDED",
+)
+
+
+def _claude_bin() -> str:
+    import shutil
+    for cand in (os.environ.get("CLAUDE_BIN"), shutil.which("claude"),
+                 str(Path.home() / ".local" / "bin" / "claude")):
+        if cand and Path(cand).exists():
+            return cand
+    raise FileNotFoundError("claude CLI not found (set CLAUDE_BIN)")
+
+
+LAST_USAGE: dict = {}          # usage dell'ultima chiamata claude -p (token, costo, modello, durata)
+USAGE_LOG = Path("output/auto/usage.jsonl")
+
+
+class ClaudeRateLimited(RuntimeError):
+    pass
+
+
+RETRY_WAITS = (60, 180, 600)   # secondi di attesa tra i tentativi su rate limit / errori API
+
+
+def run_claude_json(prompt: str, system: str, model: str, timeout: int, tools: str = "",
+                    extra_args: list[str] | None = None) -> dict:
+    """
+    Esegue `claude -p` (JSON) e ritorna il dict di risposta. Riprova su rate limit / errori API
+    (429, 5xx, overloaded) con attese crescenti; solleva RuntimeError con il messaggio vero.
+    """
+    cmd = [_claude_bin(), "-p", "--tools", tools, "--output-format", "json",
+           "--no-session-persistence", "--model", model, "--system-prompt", system,
+           # niente server MCP: risparmia ~14k token di definizioni per chiamata e non li avvia
+           "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', *(extra_args or [])]
+    env = {k: v for k, v in os.environ.items() if k not in _CLAUDE_SESSION_VARS}
+    last_err = ""
+    for attempt in range(len(RETRY_WAITS) + 1):
+        result = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout, env=env)
+        data = None
+        try:
+            data = json.loads(result.stdout) if result.stdout.strip() else None
+        except json.JSONDecodeError:
+            data = None
+        if data is not None and result.returncode == 0 and not data.get("is_error"):
+            return data
+        msg = (str(data.get("result")) if data else "") or result.stderr.strip() or result.stdout.strip()[:300]
+        status = data.get("api_error_status") if data else None
+        last_err = f"exit {result.returncode}, api_status={status}: {msg[:400]}"
+        retryable = status in (429, 500, 502, 503, 529) or re.search(
+            r"rate.?limit|overloaded|usage limit|too many requests|529|503", msg, re.I)
+        if attempt < len(RETRY_WAITS) and (retryable or (result.returncode != 0 and not msg)):
+            wait = RETRY_WAITS[attempt]
+            console.print(f"[yellow]  claude -p: {last_err[:120]} — riprovo tra {wait}s[/yellow]")
+            time.sleep(wait)
+            continue
+        break
+    raise (ClaudeRateLimited if re.search(r"rate.?limit|usage limit|429", last_err, re.I) else RuntimeError)(
+        f"claude -p: {last_err}")
+
+
+def _claude_code_call(system: str, prompt: str, model: str, timeout: int, purpose: str = "notes") -> str:
+    t0 = time.time()
+    data = run_claude_json(prompt, system, model, timeout)
+    out = (data.get("result") or "").strip()
+    if not out:
+        raise RuntimeError("claude -p returned no output")
+
+    # contabilità: modello principale (il CLI usa anche haiku per piccole cose interne)
+    mu = data.get("modelUsage") or {}
+    main = max(mu.items(), key=lambda kv: kv[1].get("costUSD", 0))[0] if mu else model
+    u = data.get("usage") or {}
+    LAST_USAGE.clear()
+    LAST_USAGE.update({
+        "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "purpose": purpose, "model": main,
+        "in": u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0) + u.get("cache_read_input_tokens", 0),
+        "out": u.get("output_tokens", 0), "cost_usd": round(data.get("total_cost_usd") or 0, 4),
+        "seconds": round(time.time() - t0), "chars": len(out),
+    })
+    try:
+        USAGE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(USAGE_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(LAST_USAGE) + "\n")
+    except OSError:
+        pass
+    return out
+
+
+def _generate_claude_code(prompt: str, model: str = "sonnet", timeout: int = 1800) -> str:
+    console.print(f"[cyan]Generating notes via Claude Code CLI (model={model})...[/cyan]")
+    out = _claude_code_call(SYSTEM_PROMPT, prompt, model, timeout, purpose="notes")
+    u = LAST_USAGE
+    console.print(f"[dim]  {u.get('model')}: {u.get('in')} in / {u.get('out')} out tokens, "
+                  f"${u.get('cost_usd')} eq, {u.get('seconds')}s, {len(out)} chars[/dim]")
+    return out
+
+
 def _generate_ollama(prompt: str, model: str = "mistral", host: str = "http://localhost:11434") -> str:
     import ollama
     console.print(f"[cyan]Generating notes via Ollama ({model})...[/cyan]")
@@ -565,6 +689,12 @@ def _call_backend(
             transcript=transcript,
             merged_data=merged_data,
             figures=figures,
+        )
+    elif backend == "claude-code":
+        return _generate_claude_code(
+            prompt,
+            model=cfg.get("model", "sonnet"),
+            timeout=cfg.get("timeout", 1800),
         )
     elif backend == "ollama":
         return _generate_ollama(
@@ -651,6 +781,12 @@ def _auto_fix_latex(
             ) as stream:
                 for text in stream.text_stream:
                     fixed += text
+            return _clean_latex(fixed)
+        elif backend == "claude-code":
+            fixed = _claude_code_call(
+                "You are a LaTeX expert. Fix the compilation errors and return the complete corrected .tex file. Output ONLY the LaTeX code, nothing else.",
+                fix_prompt, cfg.get("model", "sonnet"), cfg.get("timeout", 1800), purpose="latex-fix",
+            )
             return _clean_latex(fixed)
         elif backend == "openai":
             from openai import OpenAI
@@ -748,6 +884,81 @@ def _repair_figure_paths(latex: str, output_dir: Path) -> str:
     return out
 
 
+# macro non definite → pacchetto che le fornisce (fix senza LLM)
+_MACRO_PACKAGES = {
+    "booktabs": ("toprule", "midrule", "bottomrule", "cmidrule", "addlinespace"),
+    "multirow": ("multirow",),
+    "siunitx": ("SI", "si", "num", "qty", "unit"),
+    "gensymb": ("degree", "celsius", "ohm", "micro"),
+    "textcomp": ("texteuro", "textcelsius", "textdegree"),
+    "mathtools": ("coloneqq", "prescript", "DeclarePairedDelimiter"),
+    "cancel": ("cancel", "bcancel", "xcancel"),
+    "bm": ("bm",),
+    "physics": ("dv", "pdv", "qty", "abs", "norm", "grad", "curl", "div"),
+    "subcaption": ("subfigure", "subcaption"),
+    "float": ("newfloat", "floatstyle"),
+}
+
+
+def _quick_fix_latex(latex: str, errors: str) -> str | None:
+    """
+    Fix deterministici prima di scomodare l'LLM:
+      - "File `X.sty' not found" → toglie X dai \\usepackage (e prova a installarlo con tlmgr per la prossima volta)
+      - "Undefined control sequence" di macro note → aggiunge il pacchetto che le fornisce
+    None se non applicabile.
+    """
+    missing = re.findall(r"File `([^']+)\.sty' not found", errors)
+    if missing:
+        def _strip(m: "re.Match") -> str:
+            opts, pkgs = m.group(1) or "", m.group(2)
+            keep = [x.strip() for x in pkgs.split(",") if x.strip() and x.strip() not in missing]
+            if keep == [x.strip() for x in pkgs.split(",") if x.strip()]:
+                return m.group(0)                      # riga senza pacchetti mancanti: intatta
+            return f"\\usepackage{opts}{{{','.join(keep)}}}" if keep else ""
+
+        fixed = re.sub(r"\\usepackage(\[[^\]]*\])?\{([^}]*)\}", _strip, latex)
+        for pkg in missing:                            # per la prossima volta
+            try:
+                subprocess.run(["tlmgr", "install", pkg], capture_output=True, timeout=120)
+            except Exception:
+                pass
+        console.print(f"[cyan]  Removed missing package(s) {missing} from the preamble[/cyan]")
+        return fixed if fixed != latex else None
+    if "Undefined control sequence" not in errors:
+        return None
+    undefined = set(re.findall(r"\\([A-Za-z]+)", errors))
+    needed = [pkg for pkg, macros in _MACRO_PACKAGES.items()
+              if any(m in undefined for m in macros) and not re.search(r"\\usepackage(\[[^\]]*\])?\{[^}]*\b" + pkg + r"\b", latex)]
+    if not needed:
+        return None
+    line = "\\usepackage{" + ",".join(needed) + "}\n"
+    m = re.search(r"\\usepackage\{amsmath[^}]*\}\n", latex)
+    if m:
+        return latex[:m.end()] + line + latex[m.end():]
+    m = re.search(r"\\documentclass[^\n]*\n", latex)
+    return latex[:m.end()] + line + latex[m.end():] if m else None
+
+
+def _drop_missing_figures(latex: str, output_dir: Path) -> str:
+    """Rimuove i blocchi figure il cui file non esiste (pdflatex li renderebbe come box vuoti)."""
+    pattern = re.compile(r"\\begin\{figure\}.*?\\end\{figure\}", re.S)
+    dropped = []
+
+    def _check(m: "re.Match") -> str:
+        block = m.group(0)
+        for g in re.finditer(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]*)\}", block):
+            path = g.group(1).strip()
+            if not (output_dir / path).exists() and not Path(path).exists():
+                dropped.append(path)
+                return ""
+        return block
+
+    out = pattern.sub(_check, latex)
+    if dropped:
+        console.print(f"[yellow]  Dropped {len(dropped)} figure(s) with missing files: {dropped[:3]}[/yellow]")
+    return out
+
+
 def compile_pdf(
     tex_path: Path,
     pdf_output_dir: Path,
@@ -780,15 +991,27 @@ def compile_pdf(
                     error_lines = []
                     if log_path.exists():
                         log_text = log_path.read_text(encoding="utf-8", errors="replace")
-                        for line in log_text.splitlines():
+                        lines = log_text.splitlines()
+                        for i, line in enumerate(lines):
                             if line.startswith("!"):
-                                error_lines.append(line)
+                                ctx = next((l for l in lines[i + 1:i + 6] if l.startswith("l.")), "")
+                                error_lines.append(f"{line}  {ctx}".rstrip())
                     return False, "\n".join(error_lines) if error_lines else "Unknown compilation error"
             return True, ""
         except FileNotFoundError:
             return False, "pdflatex not found"
 
     success, errors = _run_pdflatex()
+
+    if not success and errors != "pdflatex not found":
+        original = tex_path.read_text(encoding="utf-8")
+        quick = _quick_fix_latex(original, errors)
+        if quick and quick != original:
+            tex_path.write_text(quick, encoding="utf-8")
+            console.print("[cyan]Retrying compilation after deterministic fix (missing packages)...[/cyan]")
+            success, errors = _run_pdflatex()
+            if not success:
+                tex_path.write_text(original, encoding="utf-8")
 
     if not success and auto_fix and errors != "pdflatex not found":
         console.print(f"[yellow]⚠ LaTeX compilation failed. Errors:[/yellow]")
@@ -859,6 +1082,7 @@ def generate_notes(
     figures: list[dict] = None,
     suffix: str = None,
     rag_context: str = None,
+    slides_text: str = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     cfg = backend_config or {}
@@ -933,7 +1157,7 @@ def generate_notes(
         console.print(f"  Chunk 1/1...")
         prompt = _build_prompt(
             full_transcript, filtered_ocr, course_name, lecture_date,
-            figures, rag_context, course_profile,
+            figures, rag_context, course_profile, slides_text,
         )
         raw = _call_backend(
             prompt, backend, cfg,
@@ -960,6 +1184,7 @@ def generate_notes(
                 figures if i == 0 else None,
                 rag_context if i == 0 else None,
                 course_profile,
+                slides_text if i == 0 else None,
             )
             raw = _call_backend(
                 prompt, backend, cfg,
@@ -974,6 +1199,7 @@ def generate_notes(
     # Repair figure paths that the LLM may have mangled (whitespace, etc.)
     # so pdflatex actually embeds them instead of silently using draft mode.
     final_latex = _repair_figure_paths(final_latex, output_dir)
+    final_latex = _drop_missing_figures(final_latex, output_dir)
 
     # Always save .tex to output/latex/ (overwritten each time)
     tex_path = output_dir / "lecture_notes.tex"
@@ -986,7 +1212,8 @@ def generate_notes(
         from src.course_profiles import _slugify
         course_dir = Path("output/course") / _slugify(course_name)
         course_dir.mkdir(parents=True, exist_ok=True)
-        archive_path = course_dir / f"{lecture_date}_{stem}.tex"
+        archive_name = f"{stem}.tex" if stem.startswith(lecture_date) else f"{lecture_date}_{stem}.tex"
+        archive_path = course_dir / archive_name
         archive_path.write_text(final_latex, encoding="utf-8")
         console.print(f"[dim]Archived for course build: {archive_path}[/dim]")
     except Exception as e:

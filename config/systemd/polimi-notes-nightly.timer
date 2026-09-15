@@ -1,0 +1,12 @@
+[Unit]
+Description=polimi-notes: job notturno alle 02:30 e recupero alle 07:00 (idempotente; recupera al risveglio se il PC era spento)
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+RandomizedDelaySec=10min
+Unit=polimi-notes-nightly.service
+
+[Install]
+WantedBy=timers.target

@@ -5,22 +5,68 @@ Uses faster-whisper (CTranslate2 backend) to transcribe lecture audio.
 Outputs both a plain .txt and a timestamped .json for alignment with OCR frames.
 """
 
+import ctypes
+import glob
 import json
 import os
+import site
+import subprocess
 from pathlib import Path
 
-import torch
 from rich.console import Console
 
 console = Console()
 
+# faster-whisper runs on CTranslate2, which dlopen()s cuBLAS/cuDNN at runtime.
+# The pip packages nvidia-cublas-cu12 / nvidia-cudnn-cu12 ship them, but not on
+# the loader path: preload them so no LD_LIBRARY_PATH fiddling is needed.
+_CUDA_LIB_GLOBS = (
+    "nvidia/cublas/lib/libcublasLt.so.*", "nvidia/cublas/lib/libcublas.so.*",
+    "nvidia/cudnn/lib/libcudnn_graph.so.*", "nvidia/cudnn/lib/libcudnn_engines_precompiled.so.*",
+    "nvidia/cudnn/lib/libcudnn_engines_runtime_compiled.so.*", "nvidia/cudnn/lib/libcudnn_heuristic.so.*",
+    "nvidia/cudnn/lib/libcudnn_ops.so.*", "nvidia/cudnn/lib/libcudnn_cnn.so.*",
+    "nvidia/cudnn/lib/libcudnn_adv.so.*", "nvidia/cudnn/lib/libcudnn.so.*",
+)
+_preloaded = False
+
+
+def _preload_cuda_libs() -> None:
+    global _preloaded
+    if _preloaded:
+        return
+    _preloaded = True
+    for sp in site.getsitepackages() + [site.getusersitepackages()]:
+        for pat in _CUDA_LIB_GLOBS:
+            for lib in sorted(glob.glob(os.path.join(sp, pat))):
+                try:
+                    ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+                except OSError:
+                    pass
+
+
+def _gpu_info() -> tuple[str, float] | None:
+    """(name, VRAM GB) of GPU 0 via nvidia-smi, or None."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip().splitlines()[0]
+        name, mib = out.rsplit(",", 1)
+        return name.strip(), float(mib) / 1024
+    except Exception:
+        return None
+
 
 def get_device() -> str:
-    """Return 'cuda' if a CUDA GPU is available, else 'cpu'."""
-    if torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0)
-        vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-        console.print(f"[green]\u2713 GPU detected:[/green] {gpu_name} ({vram_gb:.1f} GB VRAM)")
+    """Return 'cuda' if CTranslate2 sees a CUDA GPU, else 'cpu'."""
+    _preload_cuda_libs()
+    import ctranslate2
+    if ctranslate2.get_cuda_device_count() > 0:
+        info = _gpu_info()
+        if info:
+            console.print(f"[green]\u2713 GPU detected:[/green] {info[0]} ({info[1]:.1f} GB VRAM)")
+        else:
+            console.print("[green]\u2713 CUDA GPU detected[/green]")
         return "cuda"
     console.print("[yellow]\u26a0 No CUDA GPU found \u2014 falling back to CPU (slow)[/yellow]")
     return "cpu"
@@ -30,7 +76,8 @@ def recommend_model(device: str) -> str:
     """Suggest the best Whisper model for the available hardware."""
     if device == "cpu":
         return "base"
-    vram = torch.cuda.get_device_properties(0).total_memory / 1e9
+    info = _gpu_info()
+    vram = info[1] if info else 4.0
     if vram >= 10:
         return "large-v3"
     elif vram >= 5:
@@ -64,6 +111,7 @@ def transcribe(
     Returns:
         dict with keys: 'text', 'segments', 'language', 'txt_path', 'json_path'
     """
+    _preload_cuda_libs()
     from faster_whisper import WhisperModel
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -120,11 +168,8 @@ def transcribe(
     segments_list = list(segments_gen)
     full_text = " ".join(s.text.strip() for s in segments_list)
 
-    # Free GPU memory immediately
+    # Free GPU memory immediately (CTranslate2 releases it when the model is dropped)
     del model
-    if device == "cuda":
-        torch.cuda.empty_cache()
-        console.print("[dim]GPU memory freed after transcription[/dim]")
 
     console.print(f"[green]\u2713 Transcription complete[/green]  "
                   f"Language: {detected_lang}  |  "
