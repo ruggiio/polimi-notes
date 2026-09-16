@@ -52,52 +52,9 @@ PROSE-FIRST RULES (the most important formatting principle):
 STRUCTURE:
 19. Organise content into \\section{} and \\subsection{} following the natural flow of the lecture; titles must be informative ("La matrice degli snapshot", not "Parte 2").
 20. Open each section with a short prose paragraph contextualising the topic before any formulas or boxes.
-21. Start the document with \\maketitle using the course name as title and the lecture date as date.
+21. Start the body with \\maketitle (title and date are provided by the system).
 
-FIXED PREAMBLE — copy this VERBATIM at the top of the document, replacing only COURSENAME and LECTUREDATE (and, if the lecture is not in Italian, you may translate the displayed box titles "Definizione", "Teorema", "Esempio", "Intuizione", "Attenzione", "In sintesi", "Lemma", "Corollario" into the lecture language). Do not add, remove, or reorder anything else in the preamble:
-
-\\documentclass[11pt,a4paper]{article}
-\\usepackage[utf8]{inputenc}
-\\usepackage[T1]{fontenc}
-\\usepackage{amsmath,amssymb,amsthm}
-\\usepackage{booktabs,array,multirow}
-\\usepackage[margin=2.5cm]{geometry}
-\\usepackage{graphicx}
-\\usepackage{enumitem}
-\\usepackage{xcolor}
-\\usepackage[most]{tcolorbox}
-\\usepackage{titlesec}
-\\usepackage{fancyhdr}
-\\definecolor{noteblue}{HTML}{185FA5}
-\\definecolor{notebluebg}{HTML}{E6F1FB}
-\\definecolor{noteteal}{HTML}{0F6E56}
-\\definecolor{notetealbg}{HTML}{E1F5EE}
-\\definecolor{noteamber}{HTML}{854F0B}
-\\definecolor{noteamberbg}{HTML}{FAEEDA}
-\\definecolor{notepurple}{HTML}{534AB7}
-\\definecolor{notepurplebg}{HTML}{EEEDFE}
-\\definecolor{notered}{HTML}{A32D2D}
-\\definecolor{noteredbg}{HTML}{FCEBEB}
-\\definecolor{notegray}{HTML}{444441}
-\\definecolor{notegraybg}{HTML}{F1EFE8}
-\\titleformat{\\section}{\\Large\\bfseries\\color{noteblue}}{\\thesection}{1em}{}[{\\color{noteblue}\\titlerule[1.2pt]}]
-\\titleformat{\\subsection}{\\large\\bfseries\\color{noteblue}}{\\thesubsection}{1em}{}
-\\newtcbtheorem[number within=section]{definizione}{Definizione}{enhanced,breakable,colback=notebluebg,colframe=noteblue,colbacktitle=notebluebg,coltitle=noteblue,fonttitle=\\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt}{def}
-\\newtcbtheorem[number within=section]{teorema}{Teorema}{enhanced,breakable,colback=notetealbg,colframe=noteteal,colbacktitle=notetealbg,coltitle=noteteal,fonttitle=\\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt}{teo}
-\\newtcbtheorem[number within=section]{esempio}{Esempio}{enhanced,breakable,colback=noteamberbg,colframe=noteamber,colbacktitle=noteamberbg,coltitle=noteamber,fonttitle=\\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt}{ex}
-\\newtcolorbox{intuizione}{enhanced,breakable,colback=notepurplebg,colframe=notepurple,colbacktitle=notepurplebg,coltitle=notepurple,fonttitle=\\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt,title=Intuizione}
-\\newtcolorbox{attenzione}{enhanced,breakable,colback=noteredbg,colframe=notered,colbacktitle=noteredbg,coltitle=notered,fonttitle=\\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt,title=Attenzione}
-\\newtcolorbox{sintesi}{enhanced,breakable,colback=notegraybg,colframe=notegraybg,colbacktitle=notegraybg,coltitle=notegray,fonttitle=\\bfseries,boxrule=0pt,titlerule=0pt,arc=2pt,title=In sintesi}
-\\theoremstyle{plain}
-\\newtheorem{lemma}{Lemma}[section]
-\\newtheorem{corollario}[lemma]{Corollario}
-\\pagestyle{fancy}
-\\fancyhf{}
-\\fancyhead[L]{\\small\\itshape COURSENAME}
-\\fancyhead[R]{\\small\\itshape LECTUREDATE}
-\\fancyfoot[C]{\\small--- \\thepage\\ ---}
-\\renewcommand{\\headrulewidth}{0.4pt}
-\\setlength{\\headheight}{14pt}
+DOCUMENT SKELETON: the preamble (packages, colors, box environments, headers, \\title and \\date) is added by the system — do NOT write it. Output ONLY the document body: start with \\begin{document} followed by \\maketitle, and end with \\end{document}. The box environments below are already defined; their displayed titles are set by the system in the lecture language.
 
 ENVIRONMENT USAGE:
 22. Numbered boxes take a short title and a unique lowercase label:
@@ -109,11 +66,92 @@ ENVIRONMENT USAGE:
 
 LATEX OUTPUT RULES:
 25. Output ONLY valid LaTeX — no prose explanation, no markdown, no code fences before or after.
-26. Begin with the fixed preamble above and end with \\end{document}.
+26. Begin with \\begin{document} (no preamble) and end with \\end{document}.
 27. Always wrap \\begin{cases} inside math mode: \\[ \\begin{cases}...\\end{cases} \\] or $\\begin{cases}...\\end{cases}$ — never outside math mode.
 28. Never use Unicode subscripts or superscripts (₁₂₃⁰¹²) — always use LaTeX math notation: $\\text{Ni}_3\\text{Ti}$, $\\text{CO}_2$.
 29. Never use % characters in \\section/\\subsection titles or box titles; escape special characters (&, %, #, _) in text.
 """
+
+
+
+# ── Preambolo fisso, generato dal codice (il modello scrive solo il corpo) ────
+# Titoli dei box nella lingua della lezione (rilevata da Whisper); default italiano.
+BOX_TITLES = {
+    "it": {"definizione": "Definizione", "teorema": "Teorema", "esempio": "Esempio", "intuizione": "Intuizione",
+           "attenzione": "Attenzione", "sintesi": "In sintesi", "lemma": "Lemma", "corollario": "Corollario"},
+    "en": {"definizione": "Definition", "teorema": "Theorem", "esempio": "Example", "intuizione": "Intuition",
+           "attenzione": "Warning", "sintesi": "In summary", "lemma": "Lemma", "corollario": "Corollary"},
+}
+
+PREAMBLE_TEMPLATE = r"""\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs,array,multirow}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[most]{tcolorbox}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\definecolor{noteblue}{HTML}{185FA5}
+\definecolor{notebluebg}{HTML}{E6F1FB}
+\definecolor{noteteal}{HTML}{0F6E56}
+\definecolor{notetealbg}{HTML}{E1F5EE}
+\definecolor{noteamber}{HTML}{854F0B}
+\definecolor{noteamberbg}{HTML}{FAEEDA}
+\definecolor{notepurple}{HTML}{534AB7}
+\definecolor{notepurplebg}{HTML}{EEEDFE}
+\definecolor{notered}{HTML}{A32D2D}
+\definecolor{noteredbg}{HTML}{FCEBEB}
+\definecolor{notegray}{HTML}{444441}
+\definecolor{notegraybg}{HTML}{F1EFE8}
+\titleformat{\section}{\Large\bfseries\color{noteblue}}{\thesection}{1em}{}[{\color{noteblue}\titlerule[1.2pt]}]
+\titleformat{\subsection}{\large\bfseries\color{noteblue}}{\thesubsection}{1em}{}
+\newtcbtheorem[number within=section]{definizione}{%(definizione)s}{enhanced,breakable,colback=notebluebg,colframe=noteblue,colbacktitle=notebluebg,coltitle=noteblue,fonttitle=\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt}{def}
+\newtcbtheorem[number within=section]{teorema}{%(teorema)s}{enhanced,breakable,colback=notetealbg,colframe=noteteal,colbacktitle=notetealbg,coltitle=noteteal,fonttitle=\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt}{teo}
+\newtcbtheorem[number within=section]{esempio}{%(esempio)s}{enhanced,breakable,colback=noteamberbg,colframe=noteamber,colbacktitle=noteamberbg,coltitle=noteamber,fonttitle=\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt}{ex}
+\newtcolorbox{intuizione}{enhanced,breakable,colback=notepurplebg,colframe=notepurple,colbacktitle=notepurplebg,coltitle=notepurple,fonttitle=\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt,title=%(intuizione)s}
+\newtcolorbox{attenzione}{enhanced,breakable,colback=noteredbg,colframe=notered,colbacktitle=noteredbg,coltitle=notered,fonttitle=\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt,title=%(attenzione)s}
+\newtcolorbox{sintesi}{enhanced,breakable,colback=notegraybg,colframe=notegraybg,colbacktitle=notegraybg,coltitle=notegray,fonttitle=\bfseries,boxrule=0pt,titlerule=0pt,arc=2pt,title=%(sintesi)s}
+\theoremstyle{plain}
+\newtheorem{lemma}{%(lemma)s}[section]
+\newtheorem{corollario}[lemma]{%(corollario)s}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\itshape %(course)s}
+\fancyhead[R]{\small\itshape %(date)s}
+\fancyfoot[C]{\small--- \thepage\ ---}
+\renewcommand{\headrulewidth}{0.4pt}
+\setlength{\headheight}{14pt}
+\title{%(course)s}
+\author{}
+\date{%(date)s}
+"""
+
+
+def _tex_escape(t: str) -> str:
+    return re.sub(r"([&%$#_{}])", r"\\\1", t)
+
+
+def build_preamble(course_name: str, lecture_date: str, language: str | None = None) -> str:
+    titles = BOX_TITLES.get((language or "it")[:2].lower(), BOX_TITLES["en"])
+    return PREAMBLE_TEMPLATE % {**titles, "course": _tex_escape(course_name), "date": _tex_escape(lecture_date)}
+
+
+def assemble_document(body: str, course_name: str, lecture_date: str, language: str | None = None) -> str:
+    """Corpo prodotto dal modello (con o senza preambolo/\\begin{document}) → documento completo."""
+    body = body.strip()
+    if "\\begin{document}" in body:
+        body = body[body.index("\\begin{document}"):]           # scarta un eventuale preambolo del modello
+    else:
+        body = "\\begin{document}\n\\maketitle\n" + body
+    if "\\end{document}" not in body:
+        body += "\n\\end{document}\n"
+    if "\\maketitle" not in body[:400]:
+        body = body.replace("\\begin{document}", "\\begin{document}\n\\maketitle", 1)
+    return build_preamble(course_name, lecture_date, language) + "\n" + body + "\n"
 
 
 # ── OCR Filtering ─────────────────────────────────────────────────────────────
@@ -603,9 +641,11 @@ def run_claude_json(prompt: str, system: str, model: str, timeout: int, tools: s
         f"claude -p: {last_err}")
 
 
-def _claude_code_call(system: str, prompt: str, model: str, timeout: int, purpose: str = "notes") -> str:
+def _claude_code_call(system: str, prompt: str, model: str, timeout: int, purpose: str = "notes",
+                      effort: str | None = None) -> str:
     t0 = time.time()
-    data = run_claude_json(prompt, system, model, timeout)
+    data = run_claude_json(prompt, system, model, timeout,
+                           extra_args=(["--effort", effort] if effort else None))
     out = (data.get("result") or "").strip()
     if not out:
         raise RuntimeError("claude -p returned no output")
@@ -618,7 +658,11 @@ def _claude_code_call(system: str, prompt: str, model: str, timeout: int, purpos
     LAST_USAGE.update({
         "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "purpose": purpose, "model": main,
         "in": u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0) + u.get("cache_read_input_tokens", 0),
-        "out": u.get("output_tokens", 0), "cost_usd": round(data.get("total_cost_usd") or 0, 4),
+        "cache_read": u.get("cache_read_input_tokens", 0), "cache_write": u.get("cache_creation_input_tokens", 0),
+        "out": u.get("output_tokens", 0),
+        "thinking": (u.get("output_tokens_details") or {}).get("thinking_tokens", 0),
+        "effort": effort or "default",
+        "cost_usd": round(data.get("total_cost_usd") or 0, 4),
         "seconds": round(time.time() - t0), "chars": len(out),
     })
     try:
@@ -630,12 +674,16 @@ def _claude_code_call(system: str, prompt: str, model: str, timeout: int, purpos
     return out
 
 
-def _generate_claude_code(prompt: str, model: str = "sonnet", timeout: int = 1800) -> str:
-    console.print(f"[cyan]Generating notes via Claude Code CLI (model={model})...[/cyan]")
-    out = _claude_code_call(SYSTEM_PROMPT, prompt, model, timeout, purpose="notes")
+def _generate_claude_code(prompt: str, model: str = "sonnet", timeout: int = 1800,
+                          effort: str | None = None, system: str | None = None,
+                          lecture_minutes: float | None = None) -> str:
+    console.print(f"[cyan]Generating notes via Claude Code CLI (model={model}, effort={effort or 'default'})...[/cyan]")
+    # NB: effort low/medium azzera il thinking ma condensa le note (-22%/-48% di prosa, tabelle perse):
+    # misurato il 2026-09-16, incompatibile con la completezza richiesta. Lasciato come opzione esplicita.
+    out = _claude_code_call(system or SYSTEM_PROMPT, prompt, model, timeout, purpose="notes", effort=effort)
     u = LAST_USAGE
-    console.print(f"[dim]  {u.get('model')}: {u.get('in')} in / {u.get('out')} out tokens, "
-                  f"${u.get('cost_usd')} eq, {u.get('seconds')}s, {len(out)} chars[/dim]")
+    console.print(f"[dim]  {u.get('model')}: {u.get('in')} in (cache {u.get('cache_read')}) / {u.get('out')} out "
+                  f"(thinking {u.get('thinking')}) tokens, ${u.get('cost_usd')} eq, {u.get('seconds')}s, {len(out)} chars[/dim]")
     return out
 
 
@@ -695,6 +743,9 @@ def _call_backend(
             prompt,
             model=cfg.get("model", "sonnet"),
             timeout=cfg.get("timeout", 1800),
+            effort=cfg.get("effort"),
+            system=cfg.get("_system_prompt"),
+            lecture_minutes=cfg.get("_lecture_minutes"),
         )
     elif backend == "ollama":
         return _generate_ollama(
@@ -763,6 +814,13 @@ def _auto_fix_latex(
 
     console.print("[cyan]Attempting auto-fix of LaTeX errors...[/cyan]")
 
+    # 1) patch minima (poche centinaia di token in uscita invece di riscrivere ~20k token di documento)
+    if backend == "claude-code":
+        patched = _patch_fix_latex(latex_content, errors, cfg)
+        if patched:
+            return patched
+        console.print("[yellow]  Patch non applicabile: riscrittura completa[/yellow]")
+
     try:
         if backend == "claude":
             import anthropic
@@ -809,6 +867,44 @@ def _auto_fix_latex(
     except Exception as e:
         console.print(f"[yellow]⚠ Auto-fix API call failed: {e}[/yellow]")
         return None
+
+
+PATCH_SYSTEM = ("You are a LaTeX expert. You receive a document and its pdflatex errors. Reply ONLY with a JSON "
+                "array of minimal edits, each {\"find\": <exact substring of the document, 1-3 lines, unique>, "
+                "\"replace\": <corrected text>}. Fix only the listed errors; never rewrite or reflow other content; "
+                "never change wording, only LaTeX syntax. No prose, no code fences.")
+
+
+def _patch_fix_latex(latex: str, errors: str, cfg: dict) -> str | None:
+    """Chiede a Claude solo le sostituzioni minime e le applica; None se non applicabili."""
+    prompt = f"ERRORS:\n{errors}\n\nDOCUMENT:\n{latex}"
+    try:
+        raw = _claude_code_call(PATCH_SYSTEM, prompt, cfg.get("model", "sonnet"), cfg.get("timeout", 1800),
+                                purpose="latex-patch")
+        m = re.search(r"\[.*\]", raw, re.S)
+        edits = json.loads(m.group(0)) if m else None
+    except Exception as e:
+        console.print(f"[yellow]  Patch fix failed: {type(e).__name__}: {str(e)[:120]}[/yellow]")
+        return None
+    if not isinstance(edits, list) or not edits:
+        return None
+    out = latex
+    applied = 0
+    for e in edits:
+        f, r = e.get("find", ""), e.get("replace", "")
+        if not f or out.count(f) != 1:
+            continue
+        out = out.replace(f, r, 1)
+        applied += 1
+    if applied == 0:
+        return None
+    # la patch non deve toccare il contenuto: il testo fuori dal LaTeX deve restare (quasi) identico
+    before, after = re.sub(r"\\[a-zA-Z]+|[{}$\\]", "", latex), re.sub(r"\\[a-zA-Z]+|[{}$\\]", "", out)
+    if abs(len(after) - len(before)) > 0.02 * len(before):
+        console.print("[yellow]  Patch scartata: modifica il contenuto oltre la soglia[/yellow]")
+        return None
+    console.print(f"[cyan]  Applied {applied}/{len(edits)} LaTeX patch edit(s)[/cyan]")
+    return out
 
 
 def _repair_figure_paths(latex: str, output_dir: Path) -> str:
@@ -1083,9 +1179,24 @@ def generate_notes(
     suffix: str = None,
     rag_context: str = None,
     slides_text: str = None,
+    language: str = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     cfg = backend_config or {}
+    lecture_minutes = None
+    if transcript_path is not None:
+        seg = transcript_path.with_name(transcript_path.stem + "_segments.json")
+        if seg.exists():
+            try:
+                segd = json.loads(seg.read_text(encoding="utf-8"))
+                language = language or segd.get("language")
+                if segd.get("segments"):
+                    lecture_minutes = segd["segments"][-1]["end"] / 60
+            except Exception:
+                pass
+    if lecture_minutes is None and transcript_path is not None:
+        lecture_minutes = len(transcript_path.read_text(encoding="utf-8").split()) / 125   # ~125 parole/min parlate
+    cfg = dict(cfg, _lecture_minutes=lecture_minutes)
 
     if pdf_output_dir is None:
         pdf_output_dir = output_dir.parent / "notes"
@@ -1153,6 +1264,14 @@ def generate_notes(
     if course_profile:
         console.print(f"[dim]Course profile loaded for '{course_name}'[/dim]")
 
+    # claude-code: la scheda corso va nel system prompt (stabile per corso → cache hit tra lezioni
+    # consecutive); nel messaggio utente resterebbe dietro la trascrizione, mai riusabile.
+    if backend == "claude-code" and course_profile:
+        cfg = dict(cfg, _system_prompt=SYSTEM_PROMPT + "\n\n--- COURSE STYLE GUIDE ---\n"
+                   "(Terminology, notation and LaTeX conventions for this course. Follow them strictly so "
+                   "notation stays consistent across all lectures.)\n" + course_profile + "\n")
+        course_profile = None
+
     if len(words) <= MAX_WORDS_PER_CHUNK:
         console.print(f"  Chunk 1/1...")
         prompt = _build_prompt(
@@ -1195,6 +1314,9 @@ def generate_notes(
             )
             latex_sections.append(_clean_latex(raw))
         final_latex = _merge_latex_chunks(latex_sections)
+
+    # Il preambolo lo mettiamo noi: meno token in uscita e nessun errore di preambolo
+    final_latex = assemble_document(final_latex, course_name, lecture_date, language)
 
     # Repair figure paths that the LLM may have mangled (whitespace, etc.)
     # so pdflatex actually embeds them instead of silently using draft mode.

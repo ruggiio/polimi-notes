@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 from src.notes_gen import notes_gen  # noqa: E402
 from src.notes_gen.notes_gen import LAST_USAGE, generate_notes  # noqa: E402
 from src.slides.slides import SlideDeck  # noqa: E402
+from src.course_profiles import _slugify  # noqa: E402
 
 
 def metrics(tex: str, pdf: Path | None) -> dict:
@@ -53,6 +54,7 @@ def main():
     ap.add_argument("--topic", default="")
     ap.add_argument("--slides", default=None, help="cartella output/slides/<slug> già estratta")
     ap.add_argument("--models", nargs="+", default=["sonnet", "opus", "haiku"])
+    ap.add_argument("--effort", nargs="*", default=[None], help="livelli di effort da provare (es. low medium)")
     ap.add_argument("--out", default="output/probe/compare")
     a = ap.parse_args()
 
@@ -69,10 +71,11 @@ def main():
             print(f"slides: {len(deck.pages)} pagine, {len(figures)} figure")
 
     rows = []
-    for model in a.models:
-        print(f"\n════ {model} ════", flush=True)
+    for model, effort in [(m, e) for m in a.models for e in a.effort]:
+        tag = f"{model}_{effort}" if effort else model
+        print(f"\n════ {tag} ════", flush=True)
         # PDF di questo run isolato in una cartella propria
-        pdf_dir = out_dir / f"pdf_{model}"
+        pdf_dir = out_dir / f"pdf_{tag}"
         shutil.rmtree(pdf_dir, ignore_errors=True)
         t0 = time.time()
         err = None
@@ -80,7 +83,7 @@ def main():
             generate_notes(
                 merged_data=[], output_dir=latex_dir, stem=Path(a.transcript).stem,
                 course_name=a.course, lecture_date=a.date, backend="claude-code",
-                backend_config={"model": model, "timeout": 2400, "auto_fix_latex": True},
+                backend_config={"model": model, "timeout": 2400, "auto_fix_latex": True, "effort": effort},
                 compile_pdf_flag=True, transcript_path=Path(a.transcript),
                 pdf_output_dir=pdf_dir, suffix=a.topic or None, figures=figures, slides_text=slides_text,
             )
@@ -89,12 +92,15 @@ def main():
             print("ERRORE:", err)
         elapsed = round(time.time() - t0)
         pdfs = list(pdf_dir.glob("*.pdf")) if pdf_dir.exists() else []
-        pdf = out_dir / f"{model}.pdf"
+        pdf = out_dir / f"{tag}.pdf"
         if pdfs:
             shutil.copy2(pdfs[0], pdf)
         tex = latex_dir / "lecture_notes.tex"
         if tex.exists():
-            shutil.copy2(tex, out_dir / f"{model}.tex")
+            shutil.copy2(tex, out_dir / f"{tag}.tex")
+        archived = Path("output/course") / _slugify(a.course) / f"{Path(a.transcript).stem}.tex"
+        if archived.exists():
+            shutil.copy2(archived, out_dir / f"{tag}_prefix.tex")   # output originale, prima di auto-fix
         usage = dict(LAST_USAGE) if LAST_USAGE.get("purpose") == "notes" else {}
         # tutte le chiamate di questo run (note + eventuali fix) dal log usage
         calls = []
@@ -103,17 +109,18 @@ def main():
                 d = json.loads(line)
                 if d["at"] >= time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t0)):
                     calls.append(d)
-        row = {"model": model, "seconds": elapsed, "error": err,
+        row = {"model": tag, "seconds": elapsed, "error": err,
+               "thinking": sum(c.get("thinking", 0) for c in calls if c["purpose"] == "notes"),
                "calls": len(calls), "tokens_in": sum(c["in"] for c in calls), "tokens_out": sum(c["out"] for c in calls),
                "cost_usd": round(sum(c["cost_usd"] for c in calls), 3),
                "model_id": next((c["model"] for c in calls if c["purpose"] == "notes"), None),
                "pdf": str(pdf) if pdf.exists() else None,
-               **(metrics((out_dir / f"{model}.tex").read_text(), pdf) if (out_dir / f"{model}.tex").exists() else {})}
-        (out_dir / f"{model}.json").write_text(json.dumps(row, indent=2))
+               **(metrics((out_dir / f"{tag}.tex").read_text(), pdf) if (out_dir / f"{tag}.tex").exists() else {})}
+        (out_dir / f"{tag}.json").write_text(json.dumps(row, indent=2))
         rows.append(row)
         print(json.dumps(row, indent=1))
 
-    keys = ["model", "model_id", "seconds", "calls", "tokens_in", "tokens_out", "cost_usd", "pages", "words",
+    keys = ["model", "model_id", "seconds", "calls", "tokens_in", "tokens_out", "thinking", "cost_usd", "pages", "words",
             "sections", "subsections", "equations", "inline_math", "tables", "figures",
             "definizione", "teorema", "esempio", "intuizione", "attenzione", "sintesi", "error"]
     lines = ["| " + " | ".join(keys) + " |", "|" + "---|" * len(keys)]

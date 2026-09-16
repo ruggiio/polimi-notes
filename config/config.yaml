@@ -48,6 +48,7 @@ notes:
   claude-code:
     model: "sonnet"      # alias CLI: sonnet / opus / fable, o un model id completo
     timeout: 1800        # secondi per chiamata
+    # effort: medium     # low/medium/high: controlla il thinking (default del CLI se omesso)
 
   ollama:
     model: "mistral"

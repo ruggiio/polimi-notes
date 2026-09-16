@@ -432,3 +432,14 @@ Ogni chiamata `claude -p` è registrata in `output/auto/usage.jsonl` (modello, t
 ```
 
 Le chiamate batch usano `--strict-mcp-config` (nessun server MCP: ~14k token in meno per chiamata).
+
+### Token per lezione: cosa è stato misurato (settembre 2026, lezione di 77 min, Sonnet 5)
+
+| Voce | Token | Note |
+|---|---|---|
+| Ingresso | ~20.5k | system prompt 1.7k (in cache dalla seconda chiamata entro 1 h) + trascrizione ~13k + scheda corso + slide pertinenti |
+| Uscita: LaTeX | ~18k | il preambolo (1.3k) lo aggiunge il codice, il modello scrive solo il corpo |
+| Uscita: thinking | 13-22k | varia molto tra run; `--effort medium/low` lo azzera **ma condensa le note** (−22% / −48% di prosa, tabelle perse): non ammesso di default |
+| Fix LaTeX (solo se serve) | ~450 | patch find/replace invece della riscrittura completa (20k) |
+
+Ordine di grandezza a regime: **$0.43-0.50 eq per lezione**. Validazione deterministica di ogni modifica: `tools/validate_notes.py NOTES.tex --transcript T.txt --baseline OLD.tex` (copertura della trascrizione per blocchi di 3 min, frasi troncate, struttura, LaTeX). La variabilità tra run è alta (5960-8556 parole a parità di prompt): confrontare sempre almeno due campioni.
