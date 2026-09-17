@@ -6,6 +6,10 @@ Ogni stadio guarda i file su disco e fa solo ciò che manca:
   1. fetch      archivio PoliMi (corsi in config.auto.courses) → output/videos/<stem>.mp4 + .json
   2. transcribe ogni mp4 senza output/transcripts/<stem>.txt → faster-whisper (GPU)
   3. notes      ogni transcript senza PDF → notes_gen (backend da config) → output/notes/*.pdf
+                con contesto RAG dalle lezioni precedenti del corso (rag.enabled); dopo il PDF
+                il transcript viene indicizzato in output/rag (ChromaDB, embedding ONNX locali)
+  4. cleanup    per le lezioni con PDF: via l'mp4 (se keep_videos false), file di lavoro LaTeX,
+                provini del triage, cache di deck obsoleti
 
 Stato/fallimenti in output/auto/state.json; log in output/auto/nightly.log.
 Se la sessione PoliMi è scaduta lo stadio fetch viene saltato (con notifica) e gli
@@ -101,13 +105,19 @@ def current_aa() -> int:
     return t.year if t.month >= 9 else t.year - 1
 
 
+def course_config(auto: dict, course: str) -> dict:
+    """Voce di auto.courses con quel nome (case-insensitive), altrimenti {}."""
+    return next((c for c in auto.get("courses", []) if c.get("name", "").lower() == course.lower()), {})
+
+
 def lecture_meta(video: Path) -> dict:
     """Corso/data/argomento dal sidecar .json, altrimenti dal nome file YYYY-MM-DD_CORSO_argomento."""
     side = video.with_suffix(".json")
     if side.exists():
         d = json.loads(side.read_text())
         course = re.sub(r"^\d+\s*-\s*", "", d.get("course", "")).split(" (")[0].strip() or "Unknown Course"
-        return {"course": course, "date": d.get("date_iso") or str(date.today()), "topic": d.get("topic", "")}
+        return {"course": course, "date": d.get("date_iso") or str(date.today()), "topic": d.get("topic", ""),
+                "decks": d.get("decks") or []}     # override manuale dei deck di slide
     m = re.match(r"(\d{4}-\d{2}-\d{2})_([^_]+)_?(.*)", video.stem)
     if m:
         return {"course": m.group(2), "date": m.group(1), "topic": m.group(3)}
@@ -241,8 +251,11 @@ def stage_slides_sync(cfg: dict, state: State, log: Log, dry_run: bool) -> bool:
 
 # ── slide della lezione ──────────────────────────────────────────────────────
 
-def find_slides(cfg: dict, log: Log, stem: str, meta: dict, transcript: str | None):
-    """SlideDeck della lezione (estratto in output/slides/<slug>) oppure None."""
+def find_slides(cfg: dict, log: Log, stem: str, meta: dict, transcript: str | None,
+                video: Path | None = None):
+    """LectureSlides della lezione (1..slides_max_decks deck, cache in output/slides/_decks) oppure None.
+    Con il video: deck e pagine riconosciuti nei frame (con i tempi). Override manuale:
+    "decks": [nomi file] nel sidecar .json del video."""
     auto = cfg["auto"]
     if not auto.get("slides", False):
         return None
@@ -254,7 +267,10 @@ def find_slides(cfg: dict, log: Log, stem: str, meta: dict, transcript: str | No
         return locate_and_extract(root, meta["course"], meta["topic"] or stem,
                                   Path("output/slides") / _slugify(stem), transcript, log=log,
                                   triage=auto.get("slides_triage", True),
-                                  triage_model=auto.get("slides_triage_model", "haiku"))
+                                  triage_model=auto.get("slides_triage_model", "haiku"),
+                                  forced=meta.get("decks") or None,
+                                  max_decks=auto.get("slides_max_decks", 3),
+                                  video=video if auto.get("slides_video", True) else None)
     except Exception as e:
         log(f"slides: errore {type(e).__name__}: {str(e)[:150]}")
         return None
@@ -281,24 +297,93 @@ def stage_transcribe(cfg: dict, state: State, log: Log, videos_dir: Path, tr_dir
             log(f"transcribe: salto {v.name} (troppi fallimenti)")
             continue
         meta = lecture_meta(v)
+        course_cfg = course_config(auto, meta["course"])
         # initial_prompt = glossario della scheda corso + titoli/termini delle slide (se trovate)
         glossary = extract_glossary(load_profile(meta["course"]))
-        deck = find_slides(cfg, log, v.stem, meta, None)
+        deck = find_slides(cfg, log, v.stem, meta, None, video=v)
         prompt = ", ".join(x for x in (glossary, deck.key_terms() if deck else "") if x) or None
         t0 = time.time()
         try:
+            # lingua: per corso (auto.courses[].language) > globale > scelta per confidenza di decodifica
             r = transcribe(v, tr_dir, model_name=tcfg.get("model", "medium"),
-                           language=tcfg.get("language"), device=device, initial_prompt=prompt)
+                           language=course_cfg.get("language") or tcfg.get("language"),
+                           language_candidates=tuple(tcfg.get("language_candidates", ["it", "en"])),
+                           device=device, initial_prompt=prompt)
             n += 1
             state.clear_fail(key)
             log(f"transcribe: ✓ {v.stem} lang={r['language']} words={len(r['text'].split())} ({time.time() - t0:.0f}s)")
-            if not auto.get("keep_videos", True):
-                v.unlink()
-                log(f"transcribe: rimosso {v.name}")
         except Exception as e:
             k = state.fail(key, f"{type(e).__name__}: {e}")
             log(f"transcribe: ✗ {v.stem}: {type(e).__name__}: {str(e)[:200]} (fallimento {k})")
     return n
+
+
+# ── RAG di corso (contesto dalle lezioni precedenti) ─────────────────────────
+
+def open_rag(cfg: dict, log: Log):
+    """CourseRAG se rag.enabled e chromadb installato, altrimenti None (con log del perché)."""
+    rcfg = cfg.get("rag", {})
+    if not rcfg.get("enabled", False):
+        return None
+    try:
+        from src.rag.rag import CourseRAG
+        return CourseRAG(db_path=rcfg.get("db_path", "output/rag"),
+                         chunk_size=rcfg.get("chunk_size", 500), chunk_overlap=rcfg.get("chunk_overlap", 50))
+    except Exception as e:
+        log(f"rag: non disponibile ({type(e).__name__}: {str(e)[:120]}) — appunti senza contesto di corso")
+        return None
+
+
+def rag_queries(text: str, topic: str, words: int = 150) -> list[str]:
+    """Argomento + tre campioni (inizio, metà, fine) della lezione: l'inizio da solo è spesso burocrazia."""
+    w = text.split()
+    if len(w) <= 3 * words:
+        return [f"{topic}. {text}"]
+    mid = len(w) // 2
+    return [f"{topic}. " + " ".join(w[:words]), " ".join(w[mid - words // 2: mid + words // 2]),
+            " ".join(w[-words:])]
+
+
+def rag_index(rag, log: Log, txt: Path, meta: dict) -> bool:
+    """Indicizza il transcript se non lo è già (id = corso+data+chunk: upsert idempotente)."""
+    if rag.is_indexed(meta["course"], meta["date"]):
+        return False
+    n = rag.add_lecture(txt.read_text(encoding="utf-8"), meta["course"], meta["date"])
+    log(f"rag: indicizzata {txt.stem} ({n} chunk)")
+    return True
+
+
+def notes_language(ncfg: dict, course_cfg: dict, txt: Path) -> str | None:
+    """Lingua degli appunti: auto.courses[].notes_language > notes.language > lingua della lezione
+    (da Whisper, nei segmenti). 'lecture' = quella della lezione. None se ignota."""
+    want = course_cfg.get("notes_language") or ncfg.get("language") or "lecture"
+    if want != "lecture":
+        return want
+    seg = txt.with_name(txt.stem + "_segments.json")
+    try:
+        return json.loads(seg.read_text())["language"] if seg.exists() else None
+    except Exception:
+        return None
+
+
+def timed_transcript(txt: Path, every: int = 60) -> str:
+    """Trascrizione con un marcatore [mm:ss] all'inizio di ogni minuto (dai segmenti Whisper),
+    così slide e figure con i tempi si allineano al parlato. '' se i segmenti mancano."""
+    seg = txt.with_name(txt.stem + "_segments.json")
+    if not seg.exists():
+        return ""
+    try:
+        segments = json.loads(seg.read_text())["segments"]
+    except Exception:
+        return ""
+    parts, next_mark = [], 0
+    for sg in segments:
+        if sg["start"] >= next_mark:
+            m = int(sg["start"] // every) * every
+            parts.append(f"[{m // 60:02d}:{m % 60:02d}]")
+            next_mark = m + every
+        parts.append(sg["text"].strip())
+    return " ".join(parts)
 
 
 # ── stadio 3: notes ──────────────────────────────────────────────────────────
@@ -321,11 +406,19 @@ def stage_notes(cfg: dict, state: State, log: Log, videos_dir: Path, tr_dir: Pat
     pdf_dir = Path(ncfg["latex"].get("pdf_output_dir", "output/notes"))
 
     todo = []
+    done = []
     for txt in sorted(tr_dir.glob("*.txt")):
         meta = lecture_meta(videos_dir / f"{txt.stem}.mp4")
-        if not _pdf_for(meta, pdf_dir).exists():
-            todo.append((txt, meta))
+        (done if _pdf_for(meta, pdf_dir).exists() else todo).append((txt, meta))
     log(f"notes: {len(todo)} trascrizioni senza appunti (backend={backend})")
+    rag = open_rag(cfg, log) if (todo or done) and not dry_run else None
+    if rag:
+        # recupero: lezioni con PDF ma non ancora nell'indice (es. transcript fatti prima del RAG)
+        for txt, meta in done:
+            try:
+                rag_index(rag, log, txt, meta)
+            except Exception as e:
+                log(f"rag: ✗ {txt.stem}: {type(e).__name__}: {str(e)[:120]}")
     n = 0
     for txt, meta in todo:
         if max_notes is not None and n >= max_notes:
@@ -339,17 +432,33 @@ def stage_notes(cfg: dict, state: State, log: Log, videos_dir: Path, tr_dir: Pat
         if dry_run:
             continue
         # modello per corso (es. opus per i corsi più matematici), altrimenti quello del backend
-        course_cfg = next((c for c in auto.get("courses", []) if c.get("name", "").lower() == meta["course"].lower()), {})
+        course_cfg = course_config(auto, meta["course"])
         run_cfg = dict(bcfg, **({"model": course_cfg["model"]} if course_cfg.get("model") else {}))
         transcript_text = txt.read_text(encoding="utf-8")
-        deck = find_slides(cfg, log, txt.stem, meta, transcript_text)
-        slides_text, figures = None, None
+        deck = find_slides(cfg, log, txt.stem, meta, transcript_text, video=videos_dir / f"{txt.stem}.mp4")
+        slides_text, figures, prompt_transcript = None, None, None
         if deck:
             slides_text = deck.prompt_text(transcript=transcript_text)
-            figures = [{"slide": f["slide"], "caption": f["hint"],
-                        "latex_path": os.path.relpath(f["path"], latex_dir)}
+            figures = [{k: f[k] for k in ("slide", "deck", "timestamp") if k in f}
+                       | {"caption": f["hint"], "latex_path": os.path.relpath(f["path"], latex_dir)}
                        for f in deck.figure_list(transcript_text, auto.get("slides_max_figures", 8))]
-            log(f"slides: {len(figures)} figure candidate, {len(slides_text)} chars di testo pertinente")
+            log(f"slides: {len(figures)} figure candidate"
+                f"{' (fallback: ' + deck.fallback + ')' if deck.fallback else ''}, "
+                f"{len(slides_text)} chars di testo {'con tempi' if deck.timeline else 'pertinente'}")
+            if deck.timeline:
+                # slide e figure hanno i tempi: la trascrizione va nel prompt con un marcatore al minuto
+                prompt_transcript = timed_transcript(txt) or None
+        rag_context = None
+        if rag and rag.course_exists(meta["course"]):
+            try:
+                rag_context = rag.query_context(rag_queries(transcript_text, meta["topic"]), meta["course"],
+                                                n_results=cfg.get("rag", {}).get("n_results", 5),
+                                                exclude_date=meta["date"]) or None
+                if rag_context:
+                    log(f"rag: {rag_context.count('[Lecture ')} passaggi dalle lezioni precedenti "
+                        f"({len(rag_context)} chars)")
+            except Exception as e:
+                log(f"rag: ✗ query: {type(e).__name__}: {str(e)[:120]}")
         t0 = time.time()
         try:
             generate_notes(
@@ -358,16 +467,26 @@ def stage_notes(cfg: dict, state: State, log: Log, videos_dir: Path, tr_dir: Pat
                 backend=backend, backend_config=run_cfg,
                 compile_pdf_flag=ncfg["latex"].get("compile_pdf", True),
                 transcript_path=txt, pdf_output_dir=pdf_dir, suffix=meta["topic"] or None,
-                figures=figures, slides_text=slides_text,
+                figures=figures, slides_text=slides_text, rag_context=rag_context,
+                transcript_text=prompt_transcript,
+                language=notes_language(ncfg, course_cfg, txt),
             )
             pdf = _pdf_for(meta, pdf_dir)
             if pdf.exists():
                 n += 1
                 state.clear_fail(key)
-                from src.notes_gen.notes_gen import LAST_USAGE as u
+                if rag:
+                    try:
+                        rag_index(rag, log, txt, meta)
+                    except Exception as e:
+                        log(f"rag: ✗ {txt.stem}: {type(e).__name__}: {str(e)[:120]}")
+                from src.notes_gen.notes_gen import LAST_LAYOUT, LAST_USAGE as u
                 usage = (f", {u.get('model')} {u.get('in')}→{u.get('out')} tok ${u.get('cost_usd')} eq"
                          if u.get("model") else "")
                 log(f"notes: ✓ {pdf.name} ({time.time() - t0:.0f}s{usage})")
+                if LAST_LAYOUT.get("overfull"):
+                    log(f"notes: ⚠ impaginazione: {LAST_LAYOUT['overfull']} righe/tabelle oltre il margine "
+                        f"(max {LAST_LAYOUT['worst_pt']:.0f}pt) in {pdf.name}")
             else:
                 k = state.fail(key, "PDF non prodotto (errore LaTeX?)")
                 log(f"notes: ✗ {txt.stem}: PDF non prodotto (fallimento {k})")
@@ -377,6 +496,83 @@ def stage_notes(cfg: dict, state: State, log: Log, videos_dir: Path, tr_dir: Pat
     return n
 
 
+# ── stadio 4: cleanup ────────────────────────────────────────────────────────
+
+def _rm(path: Path, dry_run: bool) -> int:
+    """Rimuove file o cartella; ritorna i byte liberati."""
+    if path.is_dir():
+        size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+        if not dry_run:
+            shutil.rmtree(path, ignore_errors=True)
+    else:
+        size = path.stat().st_size
+        if not dry_run:
+            path.unlink(missing_ok=True)
+    return size
+
+
+def stage_cleanup(cfg: dict, log: Log, videos_dir: Path, tr_dir: Path, dry_run: bool) -> int:
+    """
+    Dopo gli appunti non serve più niente di pesante. Per ogni lezione che HA il PDF:
+      - l'mp4 (135-260 MB) se auto.keep_videos è false — il sidecar .json resta, è lui che dà
+        corso/data/argomento agli stadi successivi; fino al PDF il video resta, per poter
+        ritrascrivere (es. lingua sbagliata)
+    Sempre: file di lavoro di pdflatex (.aux/.log/.out), provini del triage, cache di deck
+    spostati/aggiornati/cancellati in output/slides/_decks e conversioni pptx→pdf orfane.
+    Ritorna i byte liberati.
+    """
+    auto = cfg["auto"]
+    ncfg = cfg["notes"]
+    latex_dir = Path(ncfg["latex"]["output_dir"])
+    pdf_dir = Path(ncfg["latex"].get("pdf_output_dir", "output/notes"))
+    freed = 0
+    tag = "(dry) " if dry_run else ""
+
+    if not auto.get("keep_videos", True):
+        for v in sorted(videos_dir.glob("*.mp4")):
+            if (tr_dir / f"{v.stem}.txt").exists() and _pdf_for(lecture_meta(v), pdf_dir).exists():
+                mb = _rm(v, dry_run) / 1e6
+                freed += mb * 1e6
+                log(f"cleanup: {tag}rimosso {v.name} ({mb:.0f} MB, PDF presente)")
+
+    for f in latex_dir.glob("*"):
+        if f.suffix in (".aux", ".log", ".out", ".toc", ".fls", ".fdb_latexmk") and f.is_file():
+            freed += _rm(f, dry_run)
+
+    if auto.get("slides", False):
+        from src.slides.slides import CONVERT_DIR, DECKS_DIR, cache_source, deck_cache_dir, list_decks
+        if DECKS_DIR.is_dir():
+            for d in sorted(DECKS_DIR.iterdir()):
+                if not d.is_dir():
+                    continue
+                src = cache_source(d)
+                if src is None or not src.exists() or deck_cache_dir(src) != d:
+                    freed += _rm(d, dry_run)
+                    log(f"cleanup: {tag}cache slide obsoleta {d.name}")
+                elif (d / "_triage").is_dir():
+                    freed += _rm(d / "_triage", dry_run)
+        if CONVERT_DIR.is_dir():
+            root = Path(os.path.expanduser(auto.get("slides_dir", "~/Documenti/WeBeep Sync")))
+            if root.is_dir():
+                valid = set()
+                for course_dir in root.iterdir():
+                    if course_dir.is_dir():
+                        for deck in list_decks(course_dir):
+                            if deck.suffix.lower() != ".pdf":
+                                st = deck.stat()
+                                import hashlib
+                                key = hashlib.md5(f"{deck.resolve()}|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()[:12]
+                                valid.add(f"{deck.stem}__{key}.pdf")
+                for f in CONVERT_DIR.glob("*.pdf"):
+                    if f.name not in valid:
+                        freed += _rm(f, dry_run)
+                        log(f"cleanup: {tag}conversione orfana {f.name}")
+
+    if freed:
+        log(f"cleanup: {tag}liberati {freed / 1e6:.0f} MB")
+    return freed
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -384,6 +580,7 @@ def main() -> int:
     ap.add_argument("--no-fetch", action="store_true")
     ap.add_argument("--no-transcribe", action="store_true")
     ap.add_argument("--no-notes", action="store_true")
+    ap.add_argument("--no-cleanup", action="store_true")
     ap.add_argument("--max-downloads", type=int, default=None)
     ap.add_argument("--max-notes", type=int, default=None)
     ap.add_argument("--dry-run", action="store_true")
@@ -420,6 +617,8 @@ def main() -> int:
             stage_transcribe(cfg, state, log, videos_dir, tr_dir, a.dry_run)
         if not a.no_notes:
             stage_notes(cfg, state, log, videos_dir, tr_dir, a.max_notes, a.dry_run)
+        if not a.no_cleanup and auto.get("cleanup", True):
+            stage_cleanup(cfg, log, videos_dir, tr_dir, a.dry_run)
     except Exception as e:
         errors += 1
         log(f"ERRORE non gestito: {type(e).__name__}: {e}")

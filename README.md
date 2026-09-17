@@ -351,11 +351,13 @@ MIT — personal use only. Respect Politecnico di Milano's terms of service rega
 
 ## Automazione notturna (Linux) — download, trascrizione e appunti senza interazione
 
-Verificato su Ubuntu con RTX A2000 4 GB (settembre 2026). Tre stadi idempotenti, ognuno fa solo ciò che manca su disco:
+Verificato su Ubuntu con RTX A2000 4 GB (settembre 2026). Quattro stadi idempotenti, ognuno fa solo ciò che manca su disco:
 
 ```
-Archivio registrazioni PoliMi ──fetch──▶ output/videos/*.mp4 ──transcribe──▶ output/transcripts/*.txt ──notes──▶ output/notes/*.pdf
+Archivio registrazioni PoliMi ──fetch──▶ output/videos/*.mp4 ──transcribe──▶ output/transcripts/*.txt ──notes──▶ output/notes/*.pdf ──cleanup
 ```
+
+**Cleanup** (`auto.cleanup: true`): per ogni lezione che ha già il PDF cancella l'mp4 (`keep_videos: false`; fino al PDF il video resta, per poter ritrascrivere), i file di lavoro di pdflatex, i provini del triage, le cache di deck spostati/aggiornati in `output/slides/_decks/` e le conversioni pptx→pdf orfane. Restano transcript, sidecar `.json` del video (corso/data/argomento), `.tex` archiviato in `output/course/<corso>/` e PDF. `--no-cleanup` per saltarlo.
 
 ### Come funziona il login (nessuna password nello script)
 
@@ -371,7 +373,7 @@ Archivio registrazioni PoliMi ──fetch──▶ output/videos/*.mp4 ──tra
 
 ```bash
 python3.12 -m venv .venv          # faster-whisper non richiede torch
-.venv/bin/pip install playwright python-dotenv requests rich pyyaml typer faster-whisper nvidia-cublas-cu12 nvidia-cudnn-cu12
+.venv/bin/pip install playwright python-dotenv requests rich pyyaml typer faster-whisper nvidia-cublas-cu12 nvidia-cudnn-cu12 chromadb
 .venv/bin/playwright install chromium
 cp .env.example .env               # POLIMI_USER, POLIMI_EMAIL, POLIMI_PASS
 .venv/bin/python tools/sso_login.py
@@ -389,7 +391,8 @@ auto:
       match: "BIOINSPIRED"           # filtro "Corso" dell'archivio (nome o codice)
       # aa: 2025                     # A.A. di inizio; omesso = corrente
   kind: null                          # null = tutte le forme didattiche
-  keep_videos: true
+  keep_videos: false                  # mp4 cancellato dal cleanup quando il PDF esiste
+  cleanup: true
 ```
 
 ### Uso manuale
@@ -404,15 +407,24 @@ systemctl --user start polimi-notes-nightly.service; tail -f output/auto/nightly
 
 Stato e fallimenti in `output/auto/state.json` (uno stadio che fallisce 3 volte viene saltato). Sonda diagnostica del flusso SSO: `tools/sso_probe.py`.
 
+**Contesto di corso (RAG).** Con `rag.enabled: true` il job, prima di generare gli appunti, cerca in `output/rag` (ChromaDB; embedding all-MiniLM-L6-v2 in versione ONNX inclusa in chromadb, niente torch) i passaggi delle lezioni precedenti dello stesso corso più vicini a inizio/metà/fine della trascrizione e li passa nel prompt come "context from course material" (`rag.n_results` passaggi da `rag.chunk_size` parole, ≈3k token); dopo il PDF il transcript viene indicizzato (upsert per corso+data+chunk, quindi idempotente; la lezione in corso è esclusa dalla ricerca). I transcript con PDF ma non ancora indicizzati vengono recuperati al giro successivo.
+
+**Lingua della lezione.** Il rilevatore di Whisper si fa ingannare dall'accento: un docente italiano che fa lezione in inglese viene rilevato `it` (p ≈ 0.8 su ogni finestra) e la decodifica produce una pseudo-traduzione. Con `transcription.language: null` la lingua è scelta tra `transcription.language_candidates` (default `[it, en]`) decodificando 3 finestre di 30 s con ciascuna e tenendo quella con la confidenza (avg_logprob) migliore; `auto.courses[].language: en` forza la lingua per un corso. La lingua degli appunti è `notes.language` (`en`, `it`, oppure `lecture` = quella rilevata; per corso `auto.courses[].notes_language`): viene dichiarata nel prompt e usata per i titoli dei box, altrimenti il modello oscilla tra un run e l'altro.
+
 ### Slide come supporto (WeBeep Sync)
 
-Se `auto.slides: true` e in `auto.slides_dir` (default `~/Documenti/WeBeep Sync`, la cartella di [WeBeep Sync](https://github.com/toto04/webeep-sync)) esiste una cartella con il nome del corso, il job cerca il PDF delle slide della lezione — punteggio = parole dell'argomento nel nome file/prima pagina + termini distintivi del deck presenti nella trascrizione; in caso di ambiguità non usa nulla — e lo estrae in `output/slides/<slug>/`:
+Se `auto.slides: true` e in `auto.slides_dir` (default `~/Documenti/WeBeep Sync`, la cartella di [WeBeep Sync](https://github.com/toto04/webeep-sync)) esiste una cartella con il nome del corso, il job individua le slide della lezione, in ordine di affidabilità:
+
+1. **dal video** (`slides_video: true`, `src/slides/video_match.py`): le registrazioni Webex sono lo schermo condiviso; un frame ogni 5 s, ritagliato alle bande nere e ridotto a miniatura 128×72, viene confrontato con le pagine di tutti i deck del corso (correlazione di intensità + gradiente; slide vere 0.85–0.95, false ≤ 0.6). Ne esce una **timeline** (`output/slides/<slug>/timeline.json`): quale deck, quale pagina, da quando a quando. ~1 min di CPU per ora di video, niente OCR né GPU. Se parte della lezione non ha slide riconoscibili (lavagna, deck non ancora caricato) il log lo dice.
+2. **dalla trascrizione** (`select_decks`), se il video manca o non mostra slide: per ogni pagina di ogni deck una pertinenza (termini in comune pesati per idf sul corso × quanto sono detti); il deck con media più alta entra sempre, altri (fino a `slides_max_decks`) se hanno media ≥ 35 % del migliore e abbastanza pagine forti.
+
+Con la timeline, al modello arrivano solo le pagine mostrate, con l'intervallo (`[09:25–14:20 · slide 6: …]`), le figure con "shown at mm:ss" e la trascrizione con un marcatore `[mm:ss]` al minuto: figure e definizioni finiscono dove il docente le ha mostrate. Scelta salvata (e modificabile) in `output/slides/<slug>/selection.json`; override con `"decks": ["nome.pdf", ...]` nel sidecar `.json` del video. Ogni deck è estratto una volta sola in `output/slides/_decks/<nome>__<hash>/`:
 
 - **titoli e termini** → `initial_prompt` di Whisper (insieme al glossario della scheda corso);
 - **testo pagina per pagina** → nel prompt degli appunti, come autorità per termini, nomi, simboli e formule (la trascrizione resta la fonte di ciò che è stato detto);
-- **figure** (immagini raster sopra soglia, loghi ripetuti scartati, pagine vettoriali renderizzate) → elenco `[slide N] latex_path` che Claude inserisce dove servono, con didascalie contestuali; i riferimenti a file inesistenti vengono rimossi prima di compilare.
+- **figure** (immagini raster sopra soglia, loghi ripetuti scartati, pagine vettoriali renderizzate) → elenco `[deck · slide N] latex_path` (le `slides_max_figures` più pertinenti di tutti i deck; mai vuoto se esiste una figura) che Claude inserisce dove servono, con didascalie contestuali; i riferimenti a file inesistenti vengono rimossi prima di compilare.
 
-Manuale: `python main.py notes-only transcript.txt --course "X" --date 2025-09-29 --slides slides.pdf --suffix "Argomento"`.
+Manuale: `python main.py notes-only transcript.txt --course "X" --date 2025-09-29 --slides deck1.pdf --slides deck2.pdf [--video lezione.mp4] --suffix "Argomento"`.
 
 Formati: PDF e PowerPoint (`.pptx/.ppt/.odp`, convertiti con LibreOffice in `output/slides/_converted/`, cache per data/dimensione).
 

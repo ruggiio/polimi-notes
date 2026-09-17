@@ -97,15 +97,28 @@ auto:
       # model: opus                  # override del modello per questo corso (default: notes.claude-code.model)
       # aa: 2025                     # anno di inizio A.A.; omesso = A.A. corrente
                                      # (decommenta per recuperare il 25/26: 6 lezioni ≈ 1.5 GB, ~30 min GPU, 6 chiamate a Claude)
+    - name: "LAB - MECHATRONICS"      # = nome cartella di WeBeep Sync in slides_dir
+      match: "LAB - MECHATRONICS"     # sottostringa del campo "Corso" dell'archivio (meglio il codice, es. "0612xx", se lo conosci)
+    - name: "VISION BASED 3D MEASUREMENTS"
+      match: "VISION BASED 3D"
+      # language: en                 # lingua della lezione se la scelta automatica sbaglia
+    - name: "MACHINE LEARNING FOR MECHANICAL SYSTEMS"
+      match: "MACHINE LEARNING FOR MECHANICAL"
+      # slides_links:                # se il docente pubblica le slide come link OneDrive: incolla qui il link WeBeep
+      #   - "https://webeep.polimi.it/mod/url/view.php?id=XXXXXX"
   kind: null                     # forma didattica: null = tutte, oppure LE lezione / LA lab / ES esercitazione / OT
   state_file: "output/auto/state.json"
   log_file: "output/auto/nightly.log"
-  keep_videos: true              # false = cancella l'mp4 dopo trascrizione riuscita
+  keep_videos: false             # false = cancella l'mp4 quando il PDF degli appunti esiste (prima resta, per poter ritrascrivere)
+  cleanup: true                  # dopo le note: mp4 (vedi sopra), .aux/.log LaTeX, provini triage, cache slide obsolete
   notify: true                   # notify-send per login richiesto / errori
   max_failures: 3                # dopo N fallimenti di uno stadio la lezione viene saltata
   slides_dir: "~/Scrivania/POLI"          # cartella di WeBeep Sync (o qualsiasi <dir>/<NOME CORSO>/**/*.pdf)
   slides: true                   # cerca le slide della lezione: glossario per Whisper, testo + figure per gli appunti
   slides_max_mb: 2000            # non scaricare dai link file più grandi di così
   slides_max_figures: 8          # figure candidate offerte al modello (le più pertinenti alla trascrizione)
+  slides_max_decks: 3            # una lezione può usare più deck (finire uno e iniziare il successivo)
+  slides_video: true             # riconosce nei frame del video quali slide sono state mostrate e quando (1 frame/5 s,
+                                 # ~1 min CPU per ora di video); senza match si ripiega sulla trascrizione
   slides_triage: true            # provino + Haiku (vision) per scartare sfondi/ritratti/screenshot e dare didascalie (~$0.05/deck)
   slides_triage_model: "haiku"
