@@ -405,7 +405,8 @@ def notes_only(
     lecture_date: str = typer.Option(str(date.today()), "--date", "-d"),
     backend: str = typer.Option(None, "--backend", "-b", help="Override notes.backend from config"),
     config_path: Path = typer.Option(CONFIG_PATH, "--config"),
-    slides: Path = typer.Option(None, "--slides", help="Lecture slides PDF: text + figures used as support"),
+    slides: list[Path] = typer.Option(None, "--slides", help="Lecture slides (PDF/pptx), repeatable: text + figures used as support"),
+    video: Path = typer.Option(None, "--video", help="Lecture video: detect which slides were shown and when (needs --slides)"),
     suffix: str = typer.Option(None, "--suffix", "-s", help="Optional suffix for the PDF filename"),
 ):
     """Generate LaTeX notes from an existing transcript (and optional OCR / slides)."""
@@ -416,21 +417,27 @@ def notes_only(
 
     slides_text, figures = None, None
     if slides:
-        from src.course_profiles import _slugify
-        from src.slides.slides import SlideDeck, apply_triage, extract_deck
+        from src.slides.slides import LectureSlides, load_deck
         latex_dir = Path(cfg["notes"]["latex"]["output_dir"])
-        slides_out = Path("output/slides") / _slugify(transcript.stem)
-        deck = SlideDeck.load(slides_out)
-        if not deck or Path(deck.pdf) != slides:
-            deck = extract_deck(slides, slides_out)
-            if cfg.get("auto", {}).get("slides_triage", True):
-                deck = apply_triage(deck, model=cfg["auto"].get("slides_triage_model", "haiku"),
-                                    log=lambda m: console.print(f"[dim]{m}[/dim]"))
-        max_figs = cfg.get("auto", {}).get("slides_max_figures", 8)
+        acfg = cfg.get("auto", {})
+        log = lambda m: console.print(f"[dim]{m}[/dim]")  # noqa: E731
+        deck = LectureSlides([load_deck(sp, triage=acfg.get("slides_triage", True),
+                                        triage_model=acfg.get("slides_triage_model", "haiku"), log=log)
+                              for sp in slides])
+        if video and video.exists():
+            from src.slides.video_match import match_video, mmss
+            deck.timeline = match_video(video, list(slides), log=log)
+            if deck.timeline:
+                console.print(f"[green]✓ Video:[/green] {mmss(deck.timeline.duration - deck.timeline.unmatched)} "
+                              f"of slides recognised, {mmss(deck.timeline.unmatched)} without")
+        max_figs = acfg.get("slides_max_figures", 8)
         slides_text = deck.prompt_text(transcript=text)
-        figures = [{"slide": f["slide"], "caption": f["hint"],
-                    "latex_path": os.path.relpath(f["path"], latex_dir)} for f in deck.figure_list(text, max_figs)]
-        console.print(f"[green]✓ Slides:[/green] {len(deck.pages)} pages, {len(figures)} figures from {slides.name}")
+        figures = [{k: f[k] for k in ("slide", "deck", "timestamp") if k in f}
+                   | {"caption": f["hint"], "latex_path": os.path.relpath(f["path"], latex_dir)}
+                   for f in deck.figure_list(text, max_figs)]
+        console.print(f"[green]✓ Slides:[/green] {len(deck.pages)} pages, {len(figures)} figures"
+                      f"{' (fallback: ' + deck.fallback + ')' if deck.fallback else ''} from "
+                      + ", ".join(sp.name for sp in slides))
     segments = [{"id": 0, "start": 0, "end": 9999, "text": text}]
 
     if ocr_json and ocr_json.exists():

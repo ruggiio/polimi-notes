@@ -52,7 +52,7 @@ def main():
     ap.add_argument("--course", required=True)
     ap.add_argument("--date", required=True)
     ap.add_argument("--topic", default="")
-    ap.add_argument("--slides", default=None, help="cartella output/slides/<slug> già estratta")
+    ap.add_argument("--slides", default=None, help="cartella cache di un deck già estratto (output/slides/_decks/<nome>__<hash>)")
     ap.add_argument("--models", nargs="+", default=["sonnet", "opus", "haiku"])
     ap.add_argument("--effort", nargs="*", default=[None], help="livelli di effort da provare (es. low medium)")
     ap.add_argument("--out", default="output/probe/compare")

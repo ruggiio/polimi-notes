@@ -310,7 +310,9 @@ Insert each figure near the section where the corresponding topic is discussed (
 """
         for fig in figures:
             if "slide" in fig:
-                where = f"[slide {fig['slide']}]"
+                where = f"[{fig['deck']} · slide {fig['slide']}]" if fig.get("deck") else f"[slide {fig['slide']}]"
+                if fig.get("timestamp") is not None:
+                    where = where[:-1] + f" · shown at {int(fig['timestamp'] // 60):02d}:{int(fig['timestamp'] % 60):02d}]"
             else:
                 mins = int(fig["timestamp"] // 60)
                 secs = int(fig["timestamp"] % 60)
@@ -319,7 +321,8 @@ Insert each figure near the section where the corresponding topic is discussed (
         prompt += ("\nCRITICAL: Use ONLY the exact latex_path values listed above. Never invent or modify figure filenames. "
                    f"These are CANDIDATES, not a list to include: use at most {max(1, len(figures) // 2)} of them, and a figure only "
                    "where the transcript explicitly discusses what it shows (a diagram, plot, scheme, organism or device the "
-                   "professor talked about). When in doubt, leave it out; never justify a figure with a caption. "
+                   "professor talked about). Do include the ones that match a discussed topic — the notes should have at "
+                   "least one figure whenever a candidate fits — but never justify a figure with a caption. "
                    "Write a caption that explains what the figure shows in the context of the lecture, not the slide title.\n")
 
     if rag_context:
@@ -1174,6 +1177,7 @@ def generate_notes(
     backend_config: dict = None,
     compile_pdf_flag: bool = True,
     transcript_path: Path = None,
+    transcript_text: str = None,
     pdf_output_dir: Path = None,
     figures: list[dict] = None,
     suffix: str = None,
@@ -1219,7 +1223,10 @@ def generate_notes(
 
     # ── Load full transcript ──────────────────────────────────────────────────
     full_transcript = ""
-    if transcript_path and transcript_path.exists():
+    if transcript_text:
+        full_transcript = transcript_text            # es. con marcatori [mm:ss] (tools/nightly.py)
+        console.print(f"[dim]Transcript given: {len(full_transcript.split())} words[/dim]")
+    elif transcript_path and transcript_path.exists():
         full_transcript = transcript_path.read_text(encoding="utf-8")
         console.print(f"[dim]Loaded transcript: {len(full_transcript.split())} words[/dim]")
     else:
