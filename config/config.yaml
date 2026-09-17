@@ -13,7 +13,10 @@ download:
 
 transcription:
   model: "medium"        # faster-whisper model
-  language: null         # null = auto-detect
+  language: null         # null = auto; forzabile per corso con auto.courses[].language
+  language_candidates: ["it", "en"]   # con language null: la lingua è scelta tra queste per confidenza di
+                                      # decodifica su 3 finestre (il rilevatore di Whisper scambia per "it"
+                                      # un docente italiano che parla inglese); [] = rilevatore di Whisper
   device: "cuda"
   output_dir: "output/transcripts"
 

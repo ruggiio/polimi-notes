@@ -87,6 +87,57 @@ def recommend_model(device: str) -> str:
     return "base"
 
 
+def _audio_duration(path: Path) -> float:
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                              "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=60)
+        return float(out.stdout.strip() or 0)
+    except Exception:
+        return 0.0
+
+
+def choose_language(model, audio_path: Path, candidates=("it", "en"), n_windows: int = 3,
+                    window_s: int = 30) -> tuple[str, dict[str, float]]:
+    """
+    Sceglie la lingua tra i candidati decodificando qualche finestra con ciascuna.
+
+    Il rilevatore di Whisper si fa ingannare dall'accento: un docente italiano che fa
+    lezione in inglese viene rilevato "it" (p≈0.8) su ogni finestra, e la decodifica in
+    italiano produce una pseudo-traduzione ("un approccio di l'ansano" = hands-on).
+    La lingua giusta si riconosce invece dalla confidenza della decodifica: media
+    dell'avg_logprob dei segmenti, pesata sulla durata, su n finestre sparse nella lezione.
+    Ritorna (lingua, {lingua: punteggio}).
+    """
+    import tempfile
+    candidates = [c for c in dict.fromkeys(candidates) if c]
+    if len(candidates) < 2:
+        return (candidates[0] if candidates else None), {}
+    dur = _audio_duration(audio_path)
+    if dur <= 0:
+        return None, {}
+    starts = [dur * (i + 1) / (n_windows + 1) for i in range(n_windows)]
+    scores: dict[str, list[tuple[float, float]]] = {c: [] for c in candidates}
+    for t0 in starts:
+        wav = Path(tempfile.mktemp(suffix=".wav"))
+        try:
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{max(t0 - window_s / 2, 0):.1f}",
+                            "-t", str(window_s), "-i", str(audio_path), "-ac", "1", "-ar", "16000",
+                            str(wav)], check=True, capture_output=True, timeout=120)
+            for lang in candidates:
+                segs, _ = model.transcribe(str(wav), language=lang, beam_size=1, vad_filter=True,
+                                           condition_on_previous_text=False)
+                for s in segs:
+                    scores[lang].append((s.avg_logprob, max(s.end - s.start, 0.1)))
+        except Exception:
+            continue
+        finally:
+            wav.unlink(missing_ok=True)
+    mean = {c: (sum(lp * w for lp, w in v) / sum(w for _, w in v)) if v else float("-inf")
+            for c, v in scores.items()}
+    best = max(mean, key=mean.get)
+    return (best if mean[best] > float("-inf") else None), {c: round(x, 3) for c, x in mean.items()}
+
+
 def transcribe(
     video_path: Path,
     output_dir: Path,
@@ -94,6 +145,7 @@ def transcribe(
     language: str | None = None,
     device: str = "cuda",
     initial_prompt: str | None = None,
+    language_candidates=("it", "en"),
 ) -> dict:
     """
     Transcribe the audio track of a video file using faster-whisper.
@@ -103,6 +155,9 @@ def transcribe(
         output_dir:     Where to write transcript files
         model_name:     Whisper model size
         language:       Force language (e.g. "it", "en") or None for auto
+        language_candidates: with language=None, the languages compared by
+                        decoding confidence (see choose_language); () = trust
+                        Whisper's own detector
         device:         "cuda" or "cpu"
         initial_prompt: Domain terms to anchor recognition. When None, the
                         "## Glossario" of the matching course profile in
@@ -153,6 +208,13 @@ def transcribe(
 
     console.print(f"[green]\u2713 Model loaded[/green]  device={device}  compute_type={actual_compute}")
 
+    lang_scores: dict[str, float] = {}
+    if not language and language_candidates:
+        language, lang_scores = choose_language(model, video_path, language_candidates)
+        if language:
+            console.print(f"Language: [yellow]{language}[/yellow] (decoding confidence: "
+                          + ", ".join(f"{c} {v}" for c, v in lang_scores.items()) + ")")
+
     # Transcribe
     console.print("[cyan]Transcribing...[/cyan]")
     segments_gen, info = model.transcribe(
@@ -195,6 +257,7 @@ def transcribe(
         json.dump(
             {
                 "language": detected_lang,
+                "language_scores": lang_scores,
                 "source": str(video_path),
                 "segments": serialisable_segments,
             },

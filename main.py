@@ -232,6 +232,7 @@ def run(
             output_dir=Path(tcfg["output_dir"]),
             model_name=tcfg["model"],
             language=tcfg.get("language"),
+            language_candidates=tuple(tcfg.get("language_candidates", ["it", "en"])),
             device=device,
         )
 
@@ -751,6 +752,7 @@ def batch_run_command(
                 output_dir=Path(tcfg["output_dir"]),
                 model_name=tcfg["model"],
                 language=tcfg.get("language"),
+                language_candidates=tuple(tcfg.get("language_candidates", ["it", "en"])),
                 device=device,
             )
 
