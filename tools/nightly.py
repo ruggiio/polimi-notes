@@ -484,8 +484,10 @@ def stage_notes(cfg: dict, state: State, log: Log, videos_dir: Path, tr_dir: Pat
                 usage = (f", {u.get('model')} {u.get('in')}→{u.get('out')} tok ${u.get('cost_usd')} eq"
                          if u.get("model") else "")
                 log(f"notes: ✓ {pdf.name} ({time.time() - t0:.0f}s{usage})")
+                if LAST_LAYOUT.get("fixed"):
+                    log(f"notes: impaginazione: {LAST_LAYOUT['fixed']} passaggi oltre il margine riparati dalla patch")
                 if LAST_LAYOUT.get("overfull"):
-                    log(f"notes: ⚠ impaginazione: {LAST_LAYOUT['overfull']} righe/tabelle oltre il margine "
+                    log(f"notes: ⚠ impaginazione: {LAST_LAYOUT['overfull']} righe/formule oltre il margine "
                         f"(max {LAST_LAYOUT['worst_pt']:.0f}pt) in {pdf.name}")
             else:
                 k = state.fail(key, "PDF non prodotto (errore LaTeX?)")

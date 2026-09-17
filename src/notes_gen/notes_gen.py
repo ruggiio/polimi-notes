@@ -100,6 +100,8 @@ PREAMBLE_TEMPLATE = r"""\documentclass[11pt,a4paper]{article}
 \usepackage[most]{tcolorbox}
 \usepackage{titlesec}
 \usepackage{fancyhdr}
+\usepackage[hyphens]{url}
+\emergencystretch=3em
 \definecolor{noteblue}{HTML}{185FA5}
 \definecolor{notebluebg}{HTML}{E6F1FB}
 \definecolor{noteteal}{HTML}{0F6E56}
@@ -889,12 +891,14 @@ PATCH_SYSTEM = ("You are a LaTeX expert. You receive a document and its pdflatex
                 "never change wording, only LaTeX syntax. No prose, no code fences.")
 
 
-def _patch_fix_latex(latex: str, errors: str, cfg: dict) -> str | None:
-    """Chiede a Claude solo le sostituzioni minime e le applica; None se non applicabili."""
-    prompt = f"ERRORS:\n{errors}\n\nDOCUMENT:\n{latex}"
+def _patch_fix_latex(latex: str, errors: str, cfg: dict, system: str = PATCH_SYSTEM,
+                     purpose: str = "latex-patch", full_document: bool = True) -> str | None:
+    """Chiede a Claude solo le sostituzioni minime e le applica; None se non applicabili.
+    full_document=False manda solo gli estratti in `errors` (le righe sorgente ci sono già)."""
+    prompt = f"ERRORS:\n{errors}\n\nDOCUMENT:\n{latex}" if full_document else f"PASSAGES:\n{errors}"
     try:
-        raw = _claude_code_call(PATCH_SYSTEM, prompt, cfg.get("model", "sonnet"), cfg.get("timeout", 1800),
-                                purpose="latex-patch")
+        raw = _claude_code_call(system, prompt, cfg.get("model", "sonnet"), cfg.get("timeout", 1800),
+                                purpose=purpose)
         m = re.search(r"\[.*\]", raw, re.S)
         edits = json.loads(m.group(0)) if m else None
     except Exception as e:
@@ -906,6 +910,9 @@ def _patch_fix_latex(latex: str, errors: str, cfg: dict) -> str | None:
     applied = 0
     for e in edits:
         f, r = e.get("find", ""), e.get("replace", "")
+        if not full_document:      # gli estratti hanno il numero di riga davanti: "123: ..."
+            f = re.sub(r"(?m)^\d+: ", "", f)
+            r = re.sub(r"(?m)^\d+: ", "", r)
         if not f or out.count(f) != 1:
             continue
         out = out.replace(f, r, 1)
@@ -1089,6 +1096,50 @@ def _fix_wide_tables(latex: str) -> str:
 
 LAST_LAYOUT: dict = {}         # esito dell'ultimo controllo di impaginazione (compile_pdf)
 
+_OVERFULL_RE = re.compile(r"Overfull \\hbox \(([\d.]+)pt too wide\) "
+                          r"(?:in paragraph at lines (\d+)--(\d+)|in alignment at lines (\d+)--(\d+)|detected at line (\d+))")
+
+
+def _layout_problems(log_path: Path, tex_path: Path, min_pt: float = 5.0, context: int = 1) -> list[dict]:
+    """Overfull del log con le righe sorgente del .tex a cui si riferiscono (per la patch)."""
+    if not log_path.exists() or not tex_path.exists():
+        return []
+    src = tex_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    out, seen = [], set()
+    for m in _OVERFULL_RE.finditer(log_path.read_text(errors="replace")):
+        pt = float(m.group(1))
+        if pt < min_pt:
+            continue
+        nums = [int(x) for x in m.groups()[1:] if x]
+        a, b = (nums[0], nums[-1]) if nums else (0, 0)
+        if not a or (a, b) in seen:
+            continue
+        seen.add((a, b))
+        lo, hi = max(1, a - context), min(len(src), b + context)
+        out.append({"pt": pt, "lines": (a, b),
+                    "source": "\n".join(f"{i}: {src[i - 1]}" for i in range(lo, hi + 1))})
+    return out
+
+
+LAYOUT_PATCH_SYSTEM = (
+    "You are a LaTeX expert. You receive passages of a document that run past the right margin "
+    "(pdflatex 'Overfull hbox', with how many points they exceed) and must make each fit with the "
+    "smallest LaTeX edit: split a long display formula across lines (align, multline, \\\\ breaks), "
+    "turn a long inline formula into display math, insert \\allowbreak or a hyphenation hint (\\-) "
+    "in a long word, wrap a bare URL in \\url{...}, replace a fixed-width tabular with tabularx X "
+    "columns. Never change the wording or drop anything. Reply ONLY with a JSON array of edits, each "
+    "{\"find\": <exact substring of the passage, 1-3 lines, unique in the document>, "
+    "\"replace\": <edited text>}. No prose, no code fences."
+)
+
+
+def _patch_layout(latex: str, problems: list[dict], cfg: dict) -> str | None:
+    """Patch LLM per i passaggi che escono dal margine (solo gli estratti: poche centinaia di token)."""
+    report = "\n\n".join(f"--- {p['pt']:.0f}pt too wide, .tex lines {p['lines'][0]}-{p['lines'][1]} ---\n{p['source']}"
+                           for p in problems[:12])
+    return _patch_fix_latex(latex, report, cfg, system=LAYOUT_PATCH_SYSTEM, purpose="layout-patch",
+                            full_document=False)
+
 
 def _layout_check(log_path: Path, min_pt: float = 5.0) -> dict:
     """Conta gli "Overfull hbox" del log di pdflatex sopra min_pt: righe/tabelle che escono dal margine."""
@@ -1211,7 +1262,23 @@ def compile_pdf(
     final_pdf = pdf_output_dir / pdf_filename
 
     LAST_LAYOUT.clear()
-    LAST_LAYOUT.update(_layout_check(tex_path.with_suffix(".log")))
+    LAST_LAYOUT.update(_layout_check(tex_path.with_suffix(".log")), fixed=0)
+    if LAST_LAYOUT["overfull"] and auto_fix and backend == "claude-code":
+        # righe/formule/URL oltre il margine: patch minima dal modello, tenuta solo se migliora
+        problems = _layout_problems(tex_path.with_suffix(".log"), tex_path)
+        console.print(f"[cyan]Layout: {len(problems)} passage(s) beyond the margin — asking for a patch...[/cyan]")
+        before_tex = tex_path.read_text(encoding="utf-8")
+        patched = _patch_layout(before_tex, problems, backend_config or {}) if problems else None
+        if patched:
+            tex_path.write_text(patched, encoding="utf-8")
+            ok, _ = _run_pdflatex()
+            after = _layout_check(tex_path.with_suffix(".log")) if ok else None
+            if ok and after["overfull"] < LAST_LAYOUT["overfull"]:
+                LAST_LAYOUT.update(after, fixed=LAST_LAYOUT["overfull"] - after["overfull"])
+            else:
+                tex_path.write_text(before_tex, encoding="utf-8")
+                _run_pdflatex()
+                console.print("[yellow]  Layout patch did not help: kept the original[/yellow]")
     if LAST_LAYOUT["overfull"]:
         console.print(f"[yellow]⚠ Layout: {LAST_LAYOUT['overfull']} overfull box(es), "
                       f"worst {LAST_LAYOUT['worst_pt']:.0f}pt beyond the margin[/yellow]")

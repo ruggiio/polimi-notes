@@ -48,7 +48,10 @@ def main() -> int:
     tex_path = latex_dir / "lecture_notes.tex"
     tex_path.write_text(latex, encoding="utf-8")
 
-    pdf = compile_pdf(tex_path, pdf_dir, a.course, a.date, a.suffix, auto_fix=False)
+    backend = ncfg["backend"]
+    pdf = compile_pdf(tex_path, pdf_dir, a.course, a.date, a.suffix,
+                      auto_fix=ncfg.get("auto_fix_latex", False), backend=backend,
+                      backend_config=dict(ncfg.get(backend, {})))
     if not pdf:
         return 1
     from src.course_profiles import _slugify
