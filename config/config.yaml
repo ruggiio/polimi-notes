@@ -38,6 +38,8 @@ ocr:
 # single cohesive PDF with:  python -m src.course_builder "Course Name"
 # (add --no-polish to skip the Claude cohesion pass between chapters)
 notes:
+  language: "en"            # lingua degli appunti: lecture = quella della lezione (rilevata da Whisper), oppure it / en
+                            # (per corso: auto.courses[].notes_language)
   backend: "claude-code"    # claude-code = `claude -p` (abbonamento Claude Code, nessuna API key)
                             # claude = Anthropic API (ANTHROPIC_API_KEY) / ollama / openai
   use_tools: false          # true = enable Claude tool use for transcript/OCR/figure lookup

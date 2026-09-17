@@ -26,7 +26,7 @@ Backend = Literal["claude", "claude-code", "ollama", "openai"]
 SYSTEM_PROMPT = """You are an expert academic note-taker and LaTeX typesetter for university-level engineering and science courses. Your task is to convert a raw lecture transcript (and optionally OCR-extracted slide/blackboard text) into complete, beautiful LaTeX lecture notes that read like a well-written textbook chapter: clear discursive prose as the backbone, with a few colored boxes that highlight the truly key items.
 
 VOICE AND LANGUAGE:
-1. Write the notes in the same language as the lecture.
+1. Write the notes in the language stated in the request ("Language of the notes"); if none is stated, in the language of the lecture.
 2. Use simple, discursive language — short, clear sentences, as a brilliant friend explaining the subject. Always explain WHY before the formalism. Keep full mathematical rigor, but never sound bureaucratic or dry.
 
 CONTENT RULES:
@@ -46,7 +46,7 @@ PROSE-FIRST RULES (the most important formatting principle):
 14. Never place two boxes back to back: there must always be at least one full paragraph of prose between consecutive boxes.
 15. Box budget per \\section: the definitions/theorems/examples genuinely stated in the lecture; AT MOST one intuizione box (only when the professor gave a real intuition or analogy worth preserving); attenzione boxes ONLY for genuine pitfalls, easily-forgotten hypotheses, or explicit exam warnings; EXACTLY one sintesi box at the very end of each \\section with 3-5 short bullet points recapping it.
 16. Minimize \\begin{itemize}/\\begin{enumerate} in prose — only for genuine lists. (Inside sintesi, bullets are expected.)
-17. When the lecture introduces relationships between multiple variables, render them as a complete \\begin{tabular} with ALL entries filled in; never leave a table partially filled — reconstruct missing data from context or mark it "?".
+17. When the lecture introduces relationships between multiple variables, render them as a complete \\begin{tabular} with ALL entries filled in; never leave a table partially filled — reconstruct missing data from context or mark it "?". A table whose cells hold sentences must be a \\begin{tabularx}{\\textwidth}{lXX} (X columns wrap; l/c columns never do and run off the page).
 18. Bold key terms on first introduction with \\textbf{}.
 
 STRUCTURE:
@@ -75,6 +75,8 @@ LATEX OUTPUT RULES:
 
 
 # ── Preambolo fisso, generato dal codice (il modello scrive solo il corpo) ────
+LANG_NAMES = {"it": "Italian", "en": "English", "fr": "French", "de": "German", "es": "Spanish"}
+
 # Titoli dei box nella lingua della lezione (rilevata da Whisper); default italiano.
 BOX_TITLES = {
     "it": {"definizione": "Definizione", "teorema": "Teorema", "esempio": "Esempio", "intuizione": "Intuizione",
@@ -83,11 +85,14 @@ BOX_TITLES = {
            "attenzione": "Warning", "sintesi": "In summary", "lemma": "Lemma", "corollario": "Corollary"},
 }
 
+# lmodern: font vettoriali. Senza, con [T1]{fontenc} e senza cm-super, pdflatex ripiega sui bitmap
+# Type 3 (testo sottile/frastagliato, non copiabile). NB: il template è %-formattato: niente "%" qui.
 PREAMBLE_TEMPLATE = r"""\documentclass[11pt,a4paper]{article}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
+\usepackage{lmodern}
 \usepackage{amsmath,amssymb,amsthm}
-\usepackage{booktabs,array,multirow}
+\usepackage{booktabs,array,multirow,tabularx}
 \usepackage[margin=2.5cm]{geometry}
 \usepackage{graphicx}
 \usepackage{enumitem}
@@ -263,16 +268,22 @@ def _build_prompt(
     rag_context: str = None,
     course_profile: str = None,
     slides_text: str = None,
+    language: str = None,
 ) -> str:
+    lang_line = f"Language of the notes: {LANG_NAMES.get(language[:2].lower(), language)}\n" if language else ""
     prompt = f"""Convert the following lecture transcript into complete, comprehensive LaTeX notes.
 Write with a bookish, refined academic style — not a transcript dump, but polished notes a student would enjoy reading.
 Cover EVERY topic discussed — do not skip or summarise any part of the lecture.
 
 Course: {course_name}
 Date: {lecture_date}
-
+{lang_line}
 --- FULL TRANSCRIPT ---
 {transcript}
+"""
+    if re.search(r"\[\d\d:\d\d\]", transcript):
+        prompt += """(The [mm:ss] markers give the elapsed lecture time: use them only to place slides and figures
+where they were shown. Never reproduce them in the notes.)
 """
     if ocr_filtered.strip():
         prompt += f"""
@@ -1038,6 +1049,60 @@ def _quick_fix_latex(latex: str, errors: str) -> str | None:
     return latex[:m.end()] + line + latex[m.end():] if m else None
 
 
+TEXT_COLS = 82          # caratteri per riga a 11pt con margini 2.5 cm su A4 (~455pt): oltre, la tabella sborda
+
+
+def _fix_wide_tables(latex: str) -> str:
+    """
+    tabular con celle di prosa → tabularx a \textwidth con colonne X: LaTeX non manda a capo
+    le colonne l/c, quindi una tabella "aspetto / opzione A / opzione B" con frasi intere esce
+    dalla pagina (successo il 17/09/2026: tre tabelle su tre). Stima della larghezza = somma,
+    per colonna, della cella più lunga; sopra TEXT_COLS si convertono in X le colonne la cui
+    cella più lunga supera 20 caratteri (le etichette corte restano l).
+    """
+    def cells_of(body: str) -> list[list[str]]:
+        rows = []
+        for line in re.split(r"\\\\", body):
+            line = re.sub(r"\\(toprule|midrule|bottomrule|hline|cline\{[^}]*\})", "", line).strip()
+            if line:
+                rows.append([c.strip() for c in line.split("&")])
+        return rows
+
+    def repl(m: re.Match) -> str:
+        spec, body = m.group(1), m.group(2)
+        cols = re.findall(r"[lcr]|p\{[^}]*\}|X", spec.replace("|", ""))
+        rows = cells_of(body)
+        if not rows or not cols or "X" in cols:
+            return m.group(0)
+        n = len(cols)
+        longest = [max((len(re.sub(r"\\[a-zA-Z]+\*?(\[[^]]*\])?(\{[^}]*\})?", "", r[i])) for r in rows if i < len(r)), default=0)
+                   for i in range(n)]
+        if sum(longest) + 3 * n <= TEXT_COLS:
+            return m.group(0)
+        new_cols = ["X" if (c in ("l", "c", "r") and longest[i] > 20) else c for i, c in enumerate(cols)]
+        if "X" not in new_cols:
+            return m.group(0)
+        return f"\\begin{{tabularx}}{{\\textwidth}}{{{''.join(new_cols)}}}{body}\\end{{tabularx}}"
+
+    return re.sub(r"\\begin\{tabular\}\{([^}]*)\}(.*?)\\end\{tabular\}", repl, latex, flags=re.S)
+
+
+LAST_LAYOUT: dict = {}         # esito dell'ultimo controllo di impaginazione (compile_pdf)
+
+
+def _layout_check(log_path: Path, min_pt: float = 5.0) -> dict:
+    """Conta gli "Overfull hbox" del log di pdflatex sopra min_pt: righe/tabelle che escono dal margine."""
+    out = {"overfull": 0, "worst_pt": 0.0}
+    if not log_path.exists():
+        return out
+    for m in re.finditer(r"Overfull \\hbox \(([\d.]+)pt too wide", log_path.read_text(errors="replace")):
+        pt = float(m.group(1))
+        if pt >= min_pt:
+            out["overfull"] += 1
+            out["worst_pt"] = max(out["worst_pt"], pt)
+    return out
+
+
 def _drop_missing_figures(latex: str, output_dir: Path) -> str:
     """Rimuove i blocchi figure il cui file non esiste (pdflatex li renderebbe come box vuoti)."""
     pattern = re.compile(r"\\begin\{figure\}.*?\\end\{figure\}", re.S)
@@ -1144,6 +1209,12 @@ def compile_pdf(
 
     pdf_filename = _make_pdf_filename(course_name, lecture_date, suffix)
     final_pdf = pdf_output_dir / pdf_filename
+
+    LAST_LAYOUT.clear()
+    LAST_LAYOUT.update(_layout_check(tex_path.with_suffix(".log")))
+    if LAST_LAYOUT["overfull"]:
+        console.print(f"[yellow]⚠ Layout: {LAST_LAYOUT['overfull']} overfull box(es), "
+                      f"worst {LAST_LAYOUT['worst_pt']:.0f}pt beyond the margin[/yellow]")
 
     import shutil
     shutil.copy2(compiled_pdf, final_pdf)
@@ -1283,7 +1354,7 @@ def generate_notes(
         console.print(f"  Chunk 1/1...")
         prompt = _build_prompt(
             full_transcript, filtered_ocr, course_name, lecture_date,
-            figures, rag_context, course_profile, slides_text,
+            figures, rag_context, course_profile, slides_text, language,
         )
         raw = _call_backend(
             prompt, backend, cfg,
@@ -1311,6 +1382,7 @@ def generate_notes(
                 rag_context if i == 0 else None,
                 course_profile,
                 slides_text if i == 0 else None,
+                language,
             )
             raw = _call_backend(
                 prompt, backend, cfg,
@@ -1322,6 +1394,11 @@ def generate_notes(
             latex_sections.append(_clean_latex(raw))
         final_latex = _merge_latex_chunks(latex_sections)
 
+    # La risposta grezza va su disco PRIMA di qualsiasi post-elaborazione: un bug dopo la
+    # chiamata (è successo) non deve costare una seconda chiamata al modello
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "lecture_notes_raw.tex").write_text(final_latex, encoding="utf-8")
+
     # Il preambolo lo mettiamo noi: meno token in uscita e nessun errore di preambolo
     final_latex = assemble_document(final_latex, course_name, lecture_date, language)
 
@@ -1329,6 +1406,7 @@ def generate_notes(
     # so pdflatex actually embeds them instead of silently using draft mode.
     final_latex = _repair_figure_paths(final_latex, output_dir)
     final_latex = _drop_missing_figures(final_latex, output_dir)
+    final_latex = _fix_wide_tables(final_latex)
 
     # Always save .tex to output/latex/ (overwritten each time)
     tex_path = output_dir / "lecture_notes.tex"
