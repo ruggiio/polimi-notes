@@ -88,9 +88,14 @@ def open_shared_folder(page: Page, share_url: str, timeout_s: int = 60) -> tuple
     raise RuntimeError(f"cartella condivisa non aperta entro {timeout_s}s @ {page.url}")
 
 
+def _odata_path(path: str) -> str:
+    """Path per una stringa letterale OData: l'apostrofo va raddoppiato, poi URL-encoded."""
+    return quote(path.replace("'", "''"), safe="/")
+
+
 def list_folder(page: Page, site: str, folder: str) -> tuple[list[dict], list[str]]:
     """(file, sottocartelle) di una cartella via REST, con i cookie del browser."""
-    enc = quote(folder, safe="/")
+    enc = _odata_path(folder)
     hdr = {"Accept": "application/json;odata=verbose"}
     r = page.request.get(f"{site}/_api/web/GetFolderByServerRelativeUrl('{enc}')/Files"
                          "?$select=Name,Length,TimeLastModified,ServerRelativeUrl", headers=hdr)
@@ -110,7 +115,7 @@ def _download(ctx: BrowserContext, site: str, f: dict, dest: Path, progress=None
     for c in ctx.cookies():
         if host.endswith(c["domain"].lstrip(".")) or c["domain"].lstrip(".") in host:
             sess.cookies.set(c["name"], c["value"], domain=c["domain"], path=c.get("path", "/"))
-    url = f"{site}/_api/web/GetFileByServerRelativeUrl('{quote(f['url'], safe='/')}')/$value"
+    url = f"{site}/_api/web/GetFileByServerRelativeUrl('{_odata_path(f['url'])}')/$value"
     part = dest.with_suffix(dest.suffix + ".part")
     done = part.stat().st_size if part.exists() else 0
     headers = {"User-Agent": UA}
