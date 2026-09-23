@@ -283,6 +283,7 @@ def find_course_dir(slides_root: Path, course_name: str, min_ratio: float = 0.6)
 
 
 DECK_EXT = (".pdf", ".pptx", ".ppt", ".odp")
+NOTES_SUBDIR = "Appunti"       # appunti generati: stanno nella cartella del corso ma non sono un deck
 CONVERT_DIR = Path("output/slides/_converted")
 
 
@@ -292,9 +293,11 @@ def _deck_key(p: Path) -> tuple[Path, str]:
     return folder, p.stem.lower()
 
 
-def list_decks(course_dir: Path) -> list[Path]:
+def list_decks(course_dir: Path, notes_subdir: str = NOTES_SUBDIR) -> list[Path]:
     found = sorted(p for p in course_dir.rglob("*") if p.suffix.lower() in DECK_EXT
-                   and not p.name.startswith("~$") and p.stat().st_size > 10_000)
+                   and not p.name.startswith("~$") and p.stat().st_size > 10_000
+                   # i nostri PDF di appunti sono sotto la cartella del corso: non sono slide
+                   and not (notes_subdir and notes_subdir in p.relative_to(course_dir).parts))
     # sorgente + conversione insieme renderebbero il match "ambiguo" (stesso punteggio):
     # si tiene il PDF se aggiornato (niente riconversione), altrimenti il sorgente
     by_key: dict[tuple[Path, str], Path] = {}
@@ -624,7 +627,8 @@ def video_timeline(video: Path | None, decks: list[Path], out_dir: Path, log=pri
 def locate_and_extract(slides_root: Path, course_name: str, topic: str, out_dir: Path,
                        transcript: str | None = None, log=print, triage: bool = True,
                        triage_model: str = "haiku", forced: list[str] | None = None,
-                       max_decks: int = 3, video: Path | None = None) -> LectureSlides | None:
+                       max_decks: int = 3, video: Path | None = None,
+                       notes_subdir: str = NOTES_SUBDIR) -> LectureSlides | None:
     """
     Slide della lezione (LectureSlides) oppure None se il corso non ha una cartella o nessun
     deck mostra indizi. Scelta dei deck, in ordine di affidabilità:
@@ -639,7 +643,7 @@ def locate_and_extract(slides_root: Path, course_name: str, topic: str, out_dir:
     if not course_dir:
         log(f"slides: nessuna cartella per '{course_name}' in {slides_root}")
         return None
-    decks = list_decks(course_dir)
+    decks = list_decks(course_dir, notes_subdir)
     if not decks:
         log(f"slides: nessun deck in {course_dir}")
         return None

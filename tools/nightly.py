@@ -262,7 +262,7 @@ def find_slides(cfg: dict, log: Log, stem: str, meta: dict, transcript: str | No
     root = Path(os.path.expanduser(auto.get("slides_dir", "~/Documenti/WeBeep Sync")))
     if not root.is_dir():
         return None
-    from src.slides.slides import locate_and_extract
+    from src.slides.slides import NOTES_SUBDIR, locate_and_extract
     try:
         return locate_and_extract(root, meta["course"], meta["topic"] or stem,
                                   Path("output/slides") / _slugify(stem), transcript, log=log,
@@ -270,7 +270,8 @@ def find_slides(cfg: dict, log: Log, stem: str, meta: dict, transcript: str | No
                                   triage_model=auto.get("slides_triage_model", "haiku"),
                                   forced=meta.get("decks") or None,
                                   max_decks=auto.get("slides_max_decks", 3),
-                                  video=video if auto.get("slides_video", True) else None)
+                                  video=video if auto.get("slides_video", True) else None,
+                                  notes_subdir=auto.get("notes_subdir", NOTES_SUBDIR))
     except Exception as e:
         log(f"slides: errore {type(e).__name__}: {str(e)[:150]}")
         return None
@@ -388,6 +389,29 @@ def timed_transcript(txt: Path, every: int = 60) -> str:
 
 # ── stadio 3: notes ──────────────────────────────────────────────────────────
 
+def publish_notes(cfg: dict, meta: dict, pdf: Path, log: Log, dry_run: bool) -> Path | None:
+    """Copia il PDF nella sezione appunti della cartella del corso (quella delle slide).
+
+    output/notes resta la copia di riferimento: e' la sua esistenza a dire "lezione gia' fatta",
+    quindi spostare o rinominare gli appunti in POLI non fa rigenerare nulla.
+    """
+    auto = cfg["auto"]
+    sub = auto.get("notes_subdir") or ""
+    if not sub:
+        return None
+    from src.slides.slides import find_course_dir
+    root = Path(os.path.expanduser(auto.get("slides_dir", "~/Scrivania/POLI")))
+    course_dir = find_course_dir(root, meta["course"]) if root.is_dir() else None
+    if course_dir is None:
+        log(f"appunti: nessuna cartella per '{meta['course']}' in {root}")
+        return None
+    dest = course_dir / sub / pdf.name
+    if not dry_run:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(pdf, dest)
+    return dest
+
+
 def _pdf_for(meta: dict, pdf_dir: Path) -> Path:
     from src.notes_gen.notes_gen import _make_pdf_filename
     return pdf_dir / _make_pdf_filename(meta["course"], meta["date"], meta["topic"] or None)
@@ -484,6 +508,9 @@ def stage_notes(cfg: dict, state: State, log: Log, videos_dir: Path, tr_dir: Pat
                 usage = (f", {u.get('model')} {u.get('in')}→{u.get('out')} tok ${u.get('cost_usd')} eq"
                          if u.get("model") else "")
                 log(f"notes: ✓ {pdf.name} ({time.time() - t0:.0f}s{usage})")
+                dest = publish_notes(cfg, meta, pdf, log, dry_run)
+                if dest:
+                    log(f"appunti: → {dest.parent.parent.name}/{dest.parent.name}/")
                 if LAST_LAYOUT.get("fixed"):
                     log(f"notes: impaginazione: {LAST_LAYOUT['fixed']} passaggi oltre il margine riparati dalla patch")
                 if LAST_LAYOUT.get("overfull"):
@@ -542,7 +569,8 @@ def stage_cleanup(cfg: dict, log: Log, videos_dir: Path, tr_dir: Path, dry_run: 
             freed += _rm(f, dry_run)
 
     if auto.get("slides", False):
-        from src.slides.slides import CONVERT_DIR, DECKS_DIR, cache_source, deck_cache_dir, list_decks
+        from src.slides.slides import (CONVERT_DIR, DECKS_DIR, NOTES_SUBDIR, cache_source,
+                                       deck_cache_dir, list_decks)
         if DECKS_DIR.is_dir():
             for d in sorted(DECKS_DIR.iterdir()):
                 if not d.is_dir():
@@ -559,7 +587,7 @@ def stage_cleanup(cfg: dict, log: Log, videos_dir: Path, tr_dir: Path, dry_run: 
                 valid = set()
                 for course_dir in root.iterdir():
                     if course_dir.is_dir():
-                        for deck in list_decks(course_dir):
+                        for deck in list_decks(course_dir, auto.get("notes_subdir", NOTES_SUBDIR)):
                             if deck.suffix.lower() != ".pdf":
                                 st = deck.stat()
                                 import hashlib

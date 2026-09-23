@@ -114,6 +114,8 @@ auto:
   notify: true                   # notify-send per login richiesto / errori
   max_failures: 3                # dopo N fallimenti di uno stadio la lezione viene saltata
   slides_dir: "~/Scrivania/POLI"          # cartella di WeBeep Sync (o qualsiasi <dir>/<NOME CORSO>/**/*.pdf)
+  notes_subdir: "Appunti"        # il PDF viene copiato in <slides_dir>/<NOME CORSO>/<notes_subdir>/
+                                 # (output/notes resta la copia di riferimento: è quella che segna "già fatto")
   slides: true                   # cerca le slide della lezione: glossario per Whisper, testo + figure per gli appunti
   slides_max_mb: 2000            # non scaricare dai link file più grandi di così
   slides_max_figures: 8          # figure candidate offerte al modello (le più pertinenti alla trascrizione)
