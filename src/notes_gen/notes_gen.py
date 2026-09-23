@@ -615,7 +615,16 @@ USAGE_LOG = Path("output/auto/usage.jsonl")
 
 
 class ClaudeRateLimited(RuntimeError):
-    pass
+    """Limite d'uso dell'abbonamento. `reset_at` = testo dell'orario di reset, se il CLI lo dice."""
+
+    def __init__(self, msg: str, reset_at: str | None = None):
+        super().__init__(msg)
+        self.reset_at = reset_at
+
+
+# "You've hit your session limit · resets 9:10pm (Europe/Rome)": non è un picco di traffico,
+# è una quota che torna a un'ora precisa. Aspettare 60/180/600 s non serve a niente.
+SESSION_LIMIT_RE = re.compile(r"(session|usage|weekly) limit.*?reset\w*\s+(?P<at>[^)]{1,40}?)(?:\s*\(|$)", re.I | re.S)
 
 
 RETRY_WAITS = (60, 180, 600)   # secondi di attesa tra i tentativi su rate limit / errori API
@@ -645,6 +654,10 @@ def run_claude_json(prompt: str, system: str, model: str, timeout: int, tools: s
         msg = (str(data.get("result")) if data else "") or result.stderr.strip() or result.stdout.strip()[:300]
         status = data.get("api_error_status") if data else None
         last_err = f"exit {result.returncode}, api_status={status}: {msg[:400]}"
+        capped = SESSION_LIMIT_RE.search(msg)
+        if capped:
+            # quota esaurita: inutile riprovare adesso, la lezione si rifà al giro dopo
+            raise ClaudeRateLimited(f"claude -p: {last_err}", capped.group("at").strip())
         retryable = status in (429, 500, 502, 503, 529) or re.search(
             r"rate.?limit|overloaded|usage limit|too many requests|529|503", msg, re.I)
         if attempt < len(RETRY_WAITS) and (retryable or (result.returncode != 0 and not msg)):

@@ -14,7 +14,7 @@ import json
 import re
 from pathlib import Path
 
-from src.notes_gen.notes_gen import run_claude_json
+from src.notes_gen.notes_gen import ClaudeRateLimited, run_claude_json
 
 TILE, COLS, ROWS = 220, 5, 4          # 20 riquadri per foglio
 
@@ -72,13 +72,17 @@ def _ask(sheet: Path, n: int, model: str, timeout: int = 300) -> tuple[list[dict
     return json.loads(m.group(0)), data.get("total_cost_usd", 0)
 
 
-def triage_figures(figures: list[Path], work_dir: Path, model: str = "haiku", log=print) -> dict[str, str | None]:
+def triage_figures(figures: list[Path], work_dir: Path, model: str = "haiku",
+                   log=print) -> tuple[dict[str, str | None], bool]:
     """
-    {nome file: didascalia} per le figure da tenere, {nome: None} per quelle da scartare.
-    In caso di errore su un foglio, le sue figure vengono tenute (senza didascalia).
+    ({nome file: didascalia} per le figure da tenere, {nome: None} per quelle da scartare,
+    completo?). In caso di errore su un foglio le sue figure vengono tenute (senza didascalia)
+    e il risultato è marcato incompleto, cosi' chi lo mette in cache sa di doverlo rifare.
+    Il limite d'uso dell'abbonamento non è un errore del foglio: si propaga e si riprova dopo.
     """
     result: dict[str, str | None] = {}
     total_cost = 0.0
+    complete = True
     for sheet, batch in build_sheets(figures, work_dir / "_triage"):
         try:
             verdicts, cost = _ask(sheet, len(batch), model)
@@ -92,10 +96,14 @@ def triage_figures(figures: list[Path], work_dir: Path, model: str = "haiku", lo
                     result[f.name] = (v.get("caption") or "").strip()
                 else:
                     result[f.name] = None
+        except ClaudeRateLimited:
+            raise
         except Exception as e:
             log(f"triage: errore su {sheet.name} ({type(e).__name__}: {str(e)[:120]}) — tengo tutte")
+            complete = False
             for f in batch:
                 result[f.name] = ""
     kept = sum(1 for v in result.values() if v is not None)
-    log(f"triage: {kept}/{len(figures)} figure tenute (${total_cost:.3f}, {model})")
-    return result
+    log(f"triage: {kept}/{len(figures)} figure tenute (${total_cost:.3f}, {model})"
+        f"{'' if complete else ' — incompleto, da rifare'}")
+    return result, complete

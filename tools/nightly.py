@@ -262,6 +262,7 @@ def find_slides(cfg: dict, log: Log, stem: str, meta: dict, transcript: str | No
     root = Path(os.path.expanduser(auto.get("slides_dir", "~/Documenti/WeBeep Sync")))
     if not root.is_dir():
         return None
+    from src.notes_gen.notes_gen import ClaudeRateLimited
     from src.slides.slides import NOTES_SUBDIR, locate_and_extract
     try:
         return locate_and_extract(root, meta["course"], meta["topic"] or stem,
@@ -272,6 +273,8 @@ def find_slides(cfg: dict, log: Log, stem: str, meta: dict, transcript: str | No
                                   max_decks=auto.get("slides_max_decks", 3),
                                   video=video if auto.get("slides_video", True) else None,
                                   notes_subdir=auto.get("notes_subdir", NOTES_SUBDIR))
+    except ClaudeRateLimited:
+        raise                      # quota finita (triage figure): la lezione si rifà, non è senza slide
     except Exception as e:
         log(f"slides: errore {type(e).__name__}: {str(e)[:150]}")
         return None
@@ -419,7 +422,7 @@ def _pdf_for(meta: dict, pdf_dir: Path) -> Path:
 
 def stage_notes(cfg: dict, state: State, log: Log, videos_dir: Path, tr_dir: Path,
                 max_notes: int | None, dry_run: bool) -> int:
-    from src.notes_gen.notes_gen import generate_notes
+    from src.notes_gen.notes_gen import ClaudeRateLimited, generate_notes
     ncfg = cfg["notes"]
     auto = cfg["auto"]
     backend = ncfg["backend"]
@@ -519,6 +522,13 @@ def stage_notes(cfg: dict, state: State, log: Log, videos_dir: Path, tr_dir: Pat
             else:
                 k = state.fail(key, "PDF non prodotto (errore LaTeX?)")
                 log(f"notes: ✗ {txt.stem}: PDF non prodotto (fallimento {k})")
+        except ClaudeRateLimited as e:
+            # quota dell'abbonamento, non un problema della lezione: niente fallimento (dopo
+            # max_failures verrebbe saltata per sempre) e stop, le altre troverebbero lo stesso muro
+            when = f", reset {e.reset_at}" if e.reset_at else ""
+            log(f"notes: limite d'uso raggiunto{when} — mi fermo, riprendo al giro dopo")
+            notify("polimi-notes: limite d'uso", f"appunti rimandati{when}", auto.get("notify", True))
+            break
         except Exception as e:
             k = state.fail(key, f"{type(e).__name__}: {e}")
             log(f"notes: ✗ {txt.stem}: {type(e).__name__}: {str(e)[:200]} (fallimento {k})")

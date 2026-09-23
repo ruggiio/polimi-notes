@@ -80,6 +80,7 @@ class SlideDeck:
     pages: list[SlidePage]
     captions: dict = field(default_factory=dict)   # nome figura → didascalia (triage); assente = non valutata
     dropped: list = field(default_factory=list)    # figure scartate dal triage
+    triage_ok: bool = False                        # triage completato: se no, va rifatto al giro dopo
 
     # ── viste per i consumatori (calcolate da LectureSlides: un deck = caso particolare) ──
     def prompt_text(self, max_chars: int = 40_000, transcript: str | None = None) -> str:
@@ -103,7 +104,9 @@ class SlideDeck:
             return None
         d = json.loads(path.read_text())
         return SlideDeck(pdf=d["pdf"], out_dir=d["out_dir"], pages=[SlidePage(**p) for p in d["pages"]],
-                         captions=d.get("captions", {}), dropped=d.get("dropped", []))
+                         captions=d.get("captions", {}), dropped=d.get("dropped", []),
+                         # cache anteriore a questo campo: un triage con un verdetto è andato a buon fine
+                         triage_ok=d.get("triage_ok", bool(d.get("captions") or d.get("dropped"))))
 
 
 @dataclass
@@ -576,10 +579,11 @@ def apply_triage(deck: SlideDeck, model: str = "haiku", log=print) -> SlideDeck:
     figs = [Path(deck.out_dir) / f for p in deck.pages for f in p.figures]
     if not figs:
         return deck
-    verdict = triage_figures(figs, Path(deck.out_dir), model=model, log=log)
+    verdict, complete = triage_figures(figs, Path(deck.out_dir), model=model, log=log)
     shutil.rmtree(Path(deck.out_dir) / "_triage", ignore_errors=True)   # provini: servivano solo a Haiku
     deck.dropped = [n for n, v in verdict.items() if v is None]
     deck.captions = {n: v for n, v in verdict.items() if v}
+    deck.triage_ok = complete
     deck.save()
     return deck
 
@@ -592,8 +596,14 @@ def load_deck(deck_path: Path, triage: bool = True, triage_model: str = "haiku",
         deck = extract_deck(deck_path, out_dir)
         n_fig = sum(len(p.figures) for p in deck.pages)
         log(f"slides: {deck_path.name}: {len(deck.pages)} pagine, {n_fig} figure → {out_dir}")
-        if triage and n_fig:
-            deck = apply_triage(deck, model=triage_model, log=log)
+    elif triage and not deck.triage_ok and sum(len(p.figures) for p in deck.pages):
+        # l'estrazione resta buona, il triage no: rifallo invece di riusare un verdetto degradato
+        log(f"slides: {deck_path.name}: triage da rifare (era incompleto)")
+        return apply_triage(deck, model=triage_model, log=log)
+    else:
+        return deck
+    if triage and sum(len(p.figures) for p in deck.pages):
+        deck = apply_triage(deck, model=triage_model, log=log)
     return deck
 
 
