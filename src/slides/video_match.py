@@ -25,7 +25,9 @@ import numpy as np
 STEP = 5                       # secondi tra un frame e l'altro
 LW, LH = 320, 180              # decodifica a bassa risoluzione (per il riquadro del contenuto)
 W, H = 128, 72                 # miniatura confrontata
-MIN_SCORE, MIN_MARGIN = 0.75, 0.10
+MIN_SCORE, MIN_MARGIN = 0.50, 0.06   # sul residuo (template del deck tolto), non sulla correlazione grezza
+                               # (calibrato 23/09/2026: copertura 89%, ρ tempo/pagina +0.999)
+NEAR_PAGES = 2                 # pagine adiacenti dello stesso deck: stessa risposta, non ambiguità
 WEBCAM = (0.22, 0.85)          # riquadro webcam: in alto (22% delle righe) a destra (dal 85% delle colonne)
 
 
@@ -162,6 +164,22 @@ def _features(thumbs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return grad, inten
 
 
+def _renorm(X: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(X, axis=1, keepdims=True)
+    return X / np.maximum(n, 1e-6)
+
+
+def _resid_corr(F: np.ndarray, Pd: np.ndarray) -> np.ndarray:
+    """Correlazione frame×pagine dopo aver tolto da entrambi la pagina media del deck.
+
+    Il template (sfondo, intestazione, impaginazione) e' identico in tutto il deck e domina la
+    correlazione: senza toglierlo ogni frame somiglia a ogni pagina ~0.95 e l'argmax e' rumore.
+    Sul residuo resta il solo contenuto della slide.
+    """
+    mu = Pd.mean(0)
+    return _renorm(F - mu) @ _renorm(Pd - mu).T
+
+
 def match_video(video: Path, decks: list[Path], step: int = STEP, log=print) -> Timeline | None:
     """Timeline delle slide mostrate nel video, oppure None se il video non è leggibile."""
     try:
@@ -182,10 +200,21 @@ def match_video(video: Path, decks: list[Path], step: int = STEP, log=print) -> 
     P = np.concatenate(pages)
     fg, fi = _features(frames)
     pg, pi = _features(P)
-    C = 0.5 * (fg @ pg.T + fi @ pi.T)                     # (frame, pagine)
+    C = np.empty((len(frames), len(labels)), np.float32)  # (frame, pagine)
+    off = 0
+    for th in pages:                                      # un deck alla volta: il template e' suo
+        sl = slice(off, off + len(th))
+        C[:, sl] = 0.5 * (_resid_corr(fg, pg[sl]) + _resid_corr(fi, pi[sl]))
+        off += len(th)
     best = C.argmax(1)
     score = C.max(1)
-    second = np.sort(C, 1)[:, -2] if C.shape[1] > 1 else np.full(len(C), -1.0)
+    # "ambiguo" = un'altra parte del materiale spiegherebbe il frame altrettanto bene. La pagina
+    # accanto dello stesso deck no: e' la stessa risposta a meno di un'animazione o di un build.
+    deck_id = np.concatenate([np.full(len(th), i) for i, th in enumerate(pages)])
+    page_no = np.concatenate([np.arange(1, len(th) + 1) for th in pages])
+    near = (deck_id[None, :] == deck_id[best][:, None]) & \
+           (np.abs(page_no[None, :] - page_no[best][:, None]) <= NEAR_PAGES)
+    second = np.where(near, -1.0, C).max(1) if C.shape[1] > 1 else np.full(len(C), -1.0)
 
     spans: list[Span] = []
     unmatched = 0.0
