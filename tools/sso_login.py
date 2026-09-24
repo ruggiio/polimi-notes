@@ -5,8 +5,13 @@ sso_login.py — Login manuale (password + 2FA CIE) nel profilo Chromium persist
 Apre il portale Servizi Online in una finestra; tu completi il login (spunta "Resta
 connesso" se proposto). Lo script attende di vedere il portale autenticato e chiude.
 Da rifare quando fetch_lecture.py esce con codice 3 (sessione ~10 giorni).
+Con la sessione ancora valida il portale si apre già autenticato e lo script esce
+senza rinnovare nulla: per rinnovarla in anticipo usa --force, che cancella prima i
+cookie *.polimi.it del profilo e costringe a rifare il login.
 """
 
+import argparse
+import re
 import sys
 import time
 from pathlib import Path
@@ -19,9 +24,15 @@ from src.downloader.archive import ARCHIVE_SERVICE_ID, PORTALE_URL, goto_robust,
 
 
 def main():
-    profile = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "config" / "chrome_profile"
+    ap = argparse.ArgumentParser()
+    ap.add_argument("profile", nargs="?", type=Path, default=ROOT / "config" / "chrome_profile")
+    ap.add_argument("--force", action="store_true", help="rinnova anche se la sessione è ancora valida")
+    args = ap.parse_args()
+    profile = args.profile
     with sync_playwright() as pw:
         ctx = open_context(pw, profile, headless=False)
+        if args.force:
+            ctx.clear_cookies(domain=re.compile(r"(^|\.)polimi\.it$"))
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         goto_robust(page, PORTALE_URL)
         print("Completa il login nella finestra (password + CIE). Attendo il portale…")
