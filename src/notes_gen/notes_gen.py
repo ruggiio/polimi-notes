@@ -302,7 +302,9 @@ written: use them to correct transcription errors in technical terms, proper nam
 formulas, to recover the exact wording of definitions, and to follow the professor's own structure.
 The deck may cover more, or other, material than this lecture: use ONLY the parts that correspond to
 what was actually said. Never add a section, topic or example that appears only in the slides.
-Do not turn the notes into a copy of the slides: keep the explanatory prose of the lecture.)
+Do not turn the notes into a copy of the slides: keep the explanatory prose of the lecture.
+Sections marked "notebook" are the Jupyter notebook of a hands-on session: use them for the exact code,
+function and API names, and include short code excerpts only where the lecture actually worked through them.)
 {slides_text}
 """
     if figures:

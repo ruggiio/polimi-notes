@@ -11,6 +11,9 @@ Layout atteso (WeBeep Sync): <slides_dir>/<NOME CORSO>/<sezione>/<modulo>/*.pdf
     filtro a livello di pagina/figura (LectureSlides) tiene poi solo ciò che è stato discusso.
   - override manuale: chiave "decks": [nomi file] nel sidecar .json del video, oppure
     output/slides/<lezione>/selection.json
+  - notebook Jupyter (.ipynb) del corso: materiale delle esercitazioni al PC, usati quando la
+    lezione non ha slide (video senza slide riconoscibili e nessun deck indicato dall'argomento);
+    una sezione del notebook (fino al titolo successivo) vale una pagina, senza figure
 
 Estrazione (PyMuPDF): testo pagina per pagina, immagini raster sopra soglia
 (scartando loghi/sfondi ripetuti), render intero delle pagine con grafica vettoriale.
@@ -37,6 +40,9 @@ also than then there here into onto over under between about after before during
 some any all both such same other another one two three first second last new used using use use used based""".split())
 STOP |= set("""il lo la i gli le un uno una di del della dei delle a al alla ai alle da dal dalla in nel nella nei nelle
 con su sul sulla per tra fra e ed o che chi cui non si è sono come anche più molto ogni questo questa questi queste""".split())
+# parole dei titoli di lezione che non dicono nulla sull'argomento ("01 - Intro to Python" → python)
+TOPIC_GENERIC = set("""intro introduction introduzione part parte lecture lezione lesson esercitazione exercise
+exercises exe lab laboratorio slides slide chapter capitolo course corso video recap overview""".split())
 # parole comuni (inglese) che non dicono nulla sull'argomento: escluse dal calcolo dei termini distintivi
 STOP |= set("""about above according across actually after again against allow allows almost along already also
 although always among another anything around ask asked available away back become been before begin behind being below
@@ -167,7 +173,9 @@ class LectureSlides:
                 parts.append(part)
                 used += len(part) + 2
             return "\n\n".join(parts)
-        if transcript:
+        notebooks = [(d, p) for d, p in items if is_notebook(d.pdf)]
+        items = [(d, p) for d, p in items if not is_notebook(d.pdf)]
+        if transcript and items:
             rel = _page_relevance([_tokens(p.title + " " + p.text, 5) for _, p in items], transcript)
             top = max(rel, default=0.0)
             ranked = sorted(range(len(items)), key=lambda i: -rel[i])
@@ -186,6 +194,9 @@ class LectureSlides:
         for d, p in items:
             where = f"{self.label(d)} · slide {p.page}" if multi else f"slide {p.page}"
             parts.append(f"[{where}: {p.title}]\n{p.text.strip()}")
+        # notebook: tutto, in ordine (le sezioni sono il filo dell'esercitazione, il budget basta)
+        for d, p in notebooks:
+            parts.append(f"[notebook {Path(d.pdf).name} · section {p.page}: {p.title}]\n{p.text.strip()}")
         out = "\n\n".join(parts)
         return out if len(out) <= max_chars else out[:max_chars] + "\n[... slides truncated ...]"
 
@@ -315,6 +326,56 @@ def list_decks(course_dir: Path, notes_subdir: str = NOTES_SUBDIR) -> list[Path]
     return sorted(by_key.values())
 
 
+NOTEBOOK_EXT = ".ipynb"
+NOTEBOOK_SECTION_CHARS = 4000     # sezione di notebook più lunga di così: troncata (è codice, non slide)
+
+
+def is_notebook(p: Path | str) -> bool:
+    return str(p).lower().endswith(NOTEBOOK_EXT)
+
+
+def list_notebooks(course_dir: Path, notes_subdir: str = NOTES_SUBDIR) -> list[Path]:
+    return sorted(p for p in course_dir.rglob(f"*{NOTEBOOK_EXT}")
+                  if ".ipynb_checkpoints" not in p.parts
+                  and not (notes_subdir and notes_subdir in p.relative_to(course_dir).parts))
+
+
+def notebook_pages(nb: Path) -> list[tuple[str, str]]:
+    """[(titolo, testo)] per sezione: una nuova sezione a ogni titolo markdown #..### (i "##### Task"
+    restano dentro la sezione). Testo = markdown + codice delle celle; gli output non servono."""
+    try:
+        cells = json.loads(nb.read_text(encoding="utf-8")).get("cells", [])
+    except Exception:
+        return []
+    pages: list[list] = []
+    for c in cells:
+        src = "".join(c.get("source", [])) if isinstance(c.get("source"), list) else c.get("source", "")
+        if not src.strip():
+            continue
+        if c.get("cell_type") == "markdown":
+            head = src.lstrip().splitlines()[0]
+            m = re.match(r"(#{1,3})\s+(.+)", head)
+            if m or not pages:
+                pages.append([re.sub(r"[*`]", "", m.group(2)).strip() if m else nb.stem, []])
+            pages[-1][1].append(src.strip())
+        elif c.get("cell_type") == "code":
+            if not pages:
+                pages.append([nb.stem, []])
+            pages[-1][1].append("```python\n" + src.strip() + "\n```")
+    out = []
+    for title, parts in pages:
+        text = "\n\n".join(parts)
+        if len(text) > NOTEBOOK_SECTION_CHARS:
+            text = text[:NOTEBOOK_SECTION_CHARS] + "\n[...]"
+        out.append((title, text))
+    return out
+
+
+def load_notebook(nb: Path) -> SlideDeck:
+    return SlideDeck(pdf=str(nb), out_dir=str(deck_cache_dir(nb)), triage_ok=True,
+                     pages=[SlidePage(page=i + 1, title=t, text=x) for i, (t, x) in enumerate(notebook_pages(nb))])
+
+
 def as_pdf(deck: Path) -> Path | None:
     """PDF del deck: il file stesso se è un PDF, altrimenti conversione LibreOffice (cache per mtime+size)."""
     if deck.suffix.lower() == ".pdf":
@@ -359,7 +420,9 @@ def deck_cache_dir(deck: Path) -> Path:
 
 
 def deck_text(deck: Path, max_pages: int = 150) -> list[tuple[str, str]]:
-    """[(titolo, testo)] pagina per pagina; cache in <deck_cache_dir>/text.json."""
+    """[(titolo, testo)] pagina per pagina; cache in <deck_cache_dir>/text.json (notebook: sezioni, senza cache)."""
+    if is_notebook(deck):
+        return notebook_pages(deck)
     cache = deck_cache_dir(deck) / "text.json"
     if cache.exists():
         try:
@@ -428,7 +491,7 @@ def select_decks(decks: list[Path], topic: str, transcript: str | None = None,
     """
     if not decks:
         return []
-    topic_tok = _tokens(topic)
+    topic_tok = _tokens(topic) - TOPIC_GENERIC
     texts = {d: deck_text(d) for d in decks}
     page_tok = {d: [_tokens(t + " " + x, 5) for t, x in texts[d]] for d in decks}
 
@@ -644,7 +707,9 @@ def locate_and_extract(slides_root: Path, course_name: str, topic: str, out_dir:
     deck mostra indizi. Scelta dei deck, in ordine di affidabilità:
       1. "decks" forzati (sidecar del video) o selection.json già salvato;
       2. il video (video_match): deck e pagine effettivamente mostrati, con i tempi;
-      3. la trascrizione (select_decks), se il video manca o non mostra slide riconoscibili.
+      3. la trascrizione (select_decks), se il video manca o non mostra slide riconoscibili; se il
+         video c'è ma non mostra nessuna slide del corso, solo i deck indicati anche dall'argomento;
+      4. i notebook .ipynb del corso, se nessun deck è rimasto (esercitazione al PC).
     out_dir = output/slides/<lezione>: selection.json e timeline.json (riusati ai giri dopo).
     Senza trascrizione (stadio trascrizione) la scelta non viene salvata e i deck sono solo testo.
     """
@@ -654,28 +719,31 @@ def locate_and_extract(slides_root: Path, course_name: str, topic: str, out_dir:
         log(f"slides: nessuna cartella per '{course_name}' in {slides_root}")
         return None
     decks = list_decks(course_dir, notes_subdir)
-    if not decks:
+    notebooks = list_notebooks(course_dir, notes_subdir)
+    if not decks and not notebooks:
         log(f"slides: nessun deck in {course_dir}")
         return None
     sel_path = out_dir / "selection.json"
     chosen: list[tuple[Path, dict]] = []
     source = ""
     if forced:
-        chosen = [(d, {"forced": True}) for d in _resolve_forced(decks, forced)]
+        chosen = [(d, {"forced": True}) for d in _resolve_forced(decks + notebooks, forced)]
         source = "forzati"
         if not chosen:
             log(f"slides: deck forzati non trovati in {course_dir.name}: {forced}")
     elif transcript and sel_path.exists():
         try:
             saved = json.loads(sel_path.read_text())
-            chosen = [(d, {"saved": True}) for d in _resolve_forced(decks, saved.get("decks", []))]
+            chosen = [(d, {"saved": True}) for d in _resolve_forced(decks + notebooks, saved.get("decks", []))]
             source = saved.get("source", "salvati")
         except Exception:
             chosen = []
 
-    timeline = video_timeline(video, decks, out_dir, log=log)
+    timeline = video_timeline(video, decks, out_dir, log=log) if decks else None
+    blank = False                  # c'è il video ma non mostra nessuna slide del corso
     if timeline is not None:
         matched = timeline.duration - timeline.unmatched
+        blank = matched < 60
         if timeline.unmatched >= max(60.0, 0.2 * timeline.duration):
             log(f"video: {mmss(timeline.unmatched)} su {mmss(timeline.duration)} senza slide riconoscibile "
                 f"(lavagna, o un deck non ancora in {course_dir.name})")
@@ -690,6 +758,20 @@ def locate_and_extract(slides_root: Path, course_name: str, topic: str, out_dir:
         chosen = select_decks(decks, topic, transcript, max_decks=max_decks)
         source = "trascrizione" if transcript else "argomento"
         timeline = None            # il video non ha riconosciuto questi deck: niente tempi
+        if blank and chosen:
+            # esercitazione al PC, lavagna o deck non ancora caricato: la trascrizione trova sempre
+            # un deck "più vicino", ma senza un indizio anche dall'argomento è di un'altra lezione
+            weak = [d.name for d, i in chosen if i.get("topic", 0) < 0.5]
+            if weak:
+                log(f"slides: scartati {', '.join(weak)} (video senza slide, argomento non corrispondente)")
+            chosen = [(d, i) for d, i in chosen if i.get("topic", 0) >= 0.5]
+    if not chosen and notebooks:
+        picked = select_decks(notebooks, topic, transcript, max_decks=2)
+        if transcript and not blank:
+            # senza la conferma del video (nessun video) il notebook deve almeno essere nell'argomento
+            picked = [(d, i) for d, i in picked if i.get("topic", 0) > 0]
+        if picked:
+            chosen, source = picked, "notebook"
     if not chosen:
         log(f"slides: nessun deck con indizi per '{topic}' tra {len(decks)} in {course_dir.name}")
         return None
@@ -699,7 +781,8 @@ def locate_and_extract(slides_root: Path, course_name: str, topic: str, out_dir:
         timeline = None
 
     if not transcript:      # solo testo: glossario per Whisper, niente estrazione/triage
-        text_decks = [SlideDeck(pdf=str(d), out_dir=str(deck_cache_dir(d)),
+        text_decks = [load_notebook(d) if is_notebook(d) else
+                      SlideDeck(pdf=str(d), out_dir=str(deck_cache_dir(d)),
                                 pages=[SlidePage(page=i + 1, title=t, text=x) for i, (t, x) in enumerate(deck_text(d))])
                       for d, _ in chosen]
         return LectureSlides(text_decks, [dict(info, deck=d.name) for d, info in chosen], timeline=timeline)
@@ -709,5 +792,6 @@ def locate_and_extract(slides_root: Path, course_name: str, topic: str, out_dir:
                                     "decks": [d.name for d, _ in chosen],
                                     "scores": [dict(info, deck=d.name) for d, info in chosen]},
                                    indent=2, ensure_ascii=False))
-    loaded = [load_deck(d, triage=triage, triage_model=triage_model, log=log) for d, _ in chosen]
+    loaded = [load_notebook(d) if is_notebook(d) else load_deck(d, triage=triage, triage_model=triage_model, log=log)
+              for d, _ in chosen]
     return LectureSlides(loaded, [dict(info, deck=d.name) for d, info in chosen], timeline=timeline)
