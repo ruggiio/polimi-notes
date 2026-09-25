@@ -232,6 +232,7 @@ def run(
             output_dir=Path(tcfg["output_dir"]),
             model_name=tcfg["model"],
             language=tcfg.get("language"),
+            language_candidates=tuple(tcfg.get("language_candidates", ["it", "en"])),
             device=device,
         )
 
@@ -402,18 +403,45 @@ def notes_only(
     ocr_json: Path = typer.Option(None, "--ocr", help="Path to OCR JSON file"),
     course: str = typer.Option("Unknown Course", "--course", "-c"),
     lecture_date: str = typer.Option(str(date.today()), "--date", "-d"),
-    backend: str = typer.Option("claude", "--backend", "-b"),
+    backend: str = typer.Option(None, "--backend", "-b", help="Override notes.backend from config"),
     config_path: Path = typer.Option(CONFIG_PATH, "--config"),
+    slides: list[Path] = typer.Option(None, "--slides", help="Lecture slides (PDF/pptx), repeatable: text + figures used as support"),
+    video: Path = typer.Option(None, "--video", help="Lecture video: detect which slides were shown and when (needs --slides)"),
+    suffix: str = typer.Option(None, "--suffix", "-s", help="Optional suffix for the PDF filename"),
 ):
-    """Generate LaTeX notes from an existing transcript (and optional OCR)."""
+    """Generate LaTeX notes from an existing transcript (and optional OCR / slides)."""
     from src.notes_gen.notes_gen import generate_notes
-    from src.ocr.ocr import FrameOCRResult, align_ocr_with_transcript
 
     cfg = load_config(config_path)
     text = transcript.read_text(encoding="utf-8")
+
+    slides_text, figures = None, None
+    if slides:
+        from src.slides.slides import LectureSlides, load_deck
+        latex_dir = Path(cfg["notes"]["latex"]["output_dir"])
+        acfg = cfg.get("auto", {})
+        log = lambda m: console.print(f"[dim]{m}[/dim]")  # noqa: E731
+        deck = LectureSlides([load_deck(sp, triage=acfg.get("slides_triage", True),
+                                        triage_model=acfg.get("slides_triage_model", "haiku"), log=log)
+                              for sp in slides])
+        if video and video.exists():
+            from src.slides.video_match import match_video, mmss
+            deck.timeline = match_video(video, list(slides), log=log)
+            if deck.timeline:
+                console.print(f"[green]✓ Video:[/green] {mmss(deck.timeline.duration - deck.timeline.unmatched)} "
+                              f"of slides recognised, {mmss(deck.timeline.unmatched)} without")
+        max_figs = acfg.get("slides_max_figures", 8)
+        slides_text = deck.prompt_text(transcript=text)
+        figures = [{k: f[k] for k in ("slide", "deck", "timestamp") if k in f}
+                   | {"caption": f["hint"], "latex_path": os.path.relpath(f["path"], latex_dir)}
+                   for f in deck.figure_list(text, max_figs)]
+        console.print(f"[green]✓ Slides:[/green] {len(deck.pages)} pages, {len(figures)} figures"
+                      f"{' (fallback: ' + deck.fallback + ')' if deck.fallback else ''} from "
+                      + ", ".join(sp.name for sp in slides))
     segments = [{"id": 0, "start": 0, "end": 9999, "text": text}]
 
     if ocr_json and ocr_json.exists():
+        from src.ocr.ocr import FrameOCRResult, align_ocr_with_transcript   # richiede opencv/easyocr
         with open(ocr_json) as f:
             ocr_raw = json.load(f)
         ocr_results = [FrameOCRResult(**r) for r in ocr_raw]
@@ -452,6 +480,9 @@ def notes_only(
         transcript_path=transcript,
         pdf_output_dir=pdf_output_dir,
         rag_context=rag_context,
+        suffix=suffix,
+        figures=figures,
+        slides_text=slides_text,
     )
 
 
@@ -728,6 +759,7 @@ def batch_run_command(
                 output_dir=Path(tcfg["output_dir"]),
                 model_name=tcfg["model"],
                 language=tcfg.get("language"),
+                language_candidates=tuple(tcfg.get("language_candidates", ["it", "en"])),
                 device=device,
             )
 

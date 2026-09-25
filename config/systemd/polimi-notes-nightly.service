@@ -1,0 +1,16 @@
+[Unit]
+Description=polimi-notes: scarica, trascrive e genera appunti delle lezioni
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Scrivania/Personale/Trascrittore/polimi-notes
+ExecStart=%h/Scrivania/Personale/Trascrittore/polimi-notes/.venv/bin/python tools/nightly.py
+# pdflatex (~/.local/bin), ffmpeg (~/.pixi/bin), claude (~/.local/bin)
+Environment=PATH=%h/.local/bin:%h/.pixi/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+TimeoutStartSec=6h
+Nice=10
+# exit 3 = login PoliMi richiesto: non è un errore del servizio
+SuccessExitStatus=0 3

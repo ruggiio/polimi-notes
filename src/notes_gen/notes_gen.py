@@ -11,6 +11,8 @@ import json
 import os
 import re
 import subprocess
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -18,13 +20,13 @@ from rich.console import Console
 
 console = Console()
 
-Backend = Literal["claude", "ollama", "openai"]
+Backend = Literal["claude", "claude-code", "ollama", "openai"]
 
 
 SYSTEM_PROMPT = """You are an expert academic note-taker and LaTeX typesetter for university-level engineering and science courses. Your task is to convert a raw lecture transcript (and optionally OCR-extracted slide/blackboard text) into complete, beautiful LaTeX lecture notes that read like a well-written textbook chapter: clear discursive prose as the backbone, with a few colored boxes that highlight the truly key items.
 
 VOICE AND LANGUAGE:
-1. Write the notes in the same language as the lecture.
+1. Write the notes in the language stated in the request ("Language of the notes"); if none is stated, in the language of the lecture.
 2. Use simple, discursive language — short, clear sentences, as a brilliant friend explaining the subject. Always explain WHY before the formalism. Keep full mathematical rigor, but never sound bureaucratic or dry.
 
 CONTENT RULES:
@@ -44,57 +46,15 @@ PROSE-FIRST RULES (the most important formatting principle):
 14. Never place two boxes back to back: there must always be at least one full paragraph of prose between consecutive boxes.
 15. Box budget per \\section: the definitions/theorems/examples genuinely stated in the lecture; AT MOST one intuizione box (only when the professor gave a real intuition or analogy worth preserving); attenzione boxes ONLY for genuine pitfalls, easily-forgotten hypotheses, or explicit exam warnings; EXACTLY one sintesi box at the very end of each \\section with 3-5 short bullet points recapping it.
 16. Minimize \\begin{itemize}/\\begin{enumerate} in prose — only for genuine lists. (Inside sintesi, bullets are expected.)
-17. When the lecture introduces relationships between multiple variables, render them as a complete \\begin{tabular} with ALL entries filled in; never leave a table partially filled — reconstruct missing data from context or mark it "?".
+17. When the lecture introduces relationships between multiple variables, render them as a complete \\begin{tabular} with ALL entries filled in; never leave a table partially filled — reconstruct missing data from context or mark it "?". A table whose cells hold sentences must be a \\begin{tabularx}{\\textwidth}{lXX} (X columns wrap; l/c columns never do and run off the page).
 18. Bold key terms on first introduction with \\textbf{}.
 
 STRUCTURE:
 19. Organise content into \\section{} and \\subsection{} following the natural flow of the lecture; titles must be informative ("La matrice degli snapshot", not "Parte 2").
 20. Open each section with a short prose paragraph contextualising the topic before any formulas or boxes.
-21. Start the document with \\maketitle using the course name as title and the lecture date as date.
+21. Start the body with \\maketitle (title and date are provided by the system).
 
-FIXED PREAMBLE — copy this VERBATIM at the top of the document, replacing only COURSENAME and LECTUREDATE (and, if the lecture is not in Italian, you may translate the displayed box titles "Definizione", "Teorema", "Esempio", "Intuizione", "Attenzione", "In sintesi", "Lemma", "Corollario" into the lecture language). Do not add, remove, or reorder anything else in the preamble:
-
-\\documentclass[11pt,a4paper]{article}
-\\usepackage[utf8]{inputenc}
-\\usepackage[T1]{fontenc}
-\\usepackage{amsmath,amssymb,amsthm}
-\\usepackage[margin=2.5cm]{geometry}
-\\usepackage{graphicx}
-\\usepackage{enumitem}
-\\usepackage{xcolor}
-\\usepackage[most]{tcolorbox}
-\\usepackage{titlesec}
-\\usepackage{fancyhdr}
-\\definecolor{noteblue}{HTML}{185FA5}
-\\definecolor{notebluebg}{HTML}{E6F1FB}
-\\definecolor{noteteal}{HTML}{0F6E56}
-\\definecolor{notetealbg}{HTML}{E1F5EE}
-\\definecolor{noteamber}{HTML}{854F0B}
-\\definecolor{noteamberbg}{HTML}{FAEEDA}
-\\definecolor{notepurple}{HTML}{534AB7}
-\\definecolor{notepurplebg}{HTML}{EEEDFE}
-\\definecolor{notered}{HTML}{A32D2D}
-\\definecolor{noteredbg}{HTML}{FCEBEB}
-\\definecolor{notegray}{HTML}{444441}
-\\definecolor{notegraybg}{HTML}{F1EFE8}
-\\titleformat{\\section}{\\Large\\bfseries\\color{noteblue}}{\\thesection}{1em}{}[{\\color{noteblue}\\titlerule[1.2pt]}]
-\\titleformat{\\subsection}{\\large\\bfseries\\color{noteblue}}{\\thesubsection}{1em}{}
-\\newtcbtheorem[number within=section]{definizione}{Definizione}{enhanced,breakable,colback=notebluebg,colframe=noteblue,colbacktitle=notebluebg,coltitle=noteblue,fonttitle=\\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt}{def}
-\\newtcbtheorem[number within=section]{teorema}{Teorema}{enhanced,breakable,colback=notetealbg,colframe=noteteal,colbacktitle=notetealbg,coltitle=noteteal,fonttitle=\\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt}{teo}
-\\newtcbtheorem[number within=section]{esempio}{Esempio}{enhanced,breakable,colback=noteamberbg,colframe=noteamber,colbacktitle=noteamberbg,coltitle=noteamber,fonttitle=\\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt}{ex}
-\\newtcolorbox{intuizione}{enhanced,breakable,colback=notepurplebg,colframe=notepurple,colbacktitle=notepurplebg,coltitle=notepurple,fonttitle=\\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt,title=Intuizione}
-\\newtcolorbox{attenzione}{enhanced,breakable,colback=noteredbg,colframe=notered,colbacktitle=noteredbg,coltitle=notered,fonttitle=\\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt,title=Attenzione}
-\\newtcolorbox{sintesi}{enhanced,breakable,colback=notegraybg,colframe=notegraybg,colbacktitle=notegraybg,coltitle=notegray,fonttitle=\\bfseries,boxrule=0pt,titlerule=0pt,arc=2pt,title=In sintesi}
-\\theoremstyle{plain}
-\\newtheorem{lemma}{Lemma}[section]
-\\newtheorem{corollario}[lemma]{Corollario}
-\\pagestyle{fancy}
-\\fancyhf{}
-\\fancyhead[L]{\\small\\itshape COURSENAME}
-\\fancyhead[R]{\\small\\itshape LECTUREDATE}
-\\fancyfoot[C]{\\small--- \\thepage\\ ---}
-\\renewcommand{\\headrulewidth}{0.4pt}
-\\setlength{\\headheight}{14pt}
+DOCUMENT SKELETON: the preamble (packages, colors, box environments, headers, \\title and \\date) is added by the system — do NOT write it. Output ONLY the document body: start with \\begin{document} followed by \\maketitle, and end with \\end{document}. The box environments below are already defined; their displayed titles are set by the system in the lecture language.
 
 ENVIRONMENT USAGE:
 22. Numbered boxes take a short title and a unique lowercase label:
@@ -106,11 +66,99 @@ ENVIRONMENT USAGE:
 
 LATEX OUTPUT RULES:
 25. Output ONLY valid LaTeX — no prose explanation, no markdown, no code fences before or after.
-26. Begin with the fixed preamble above and end with \\end{document}.
+26. Begin with \\begin{document} (no preamble) and end with \\end{document}.
 27. Always wrap \\begin{cases} inside math mode: \\[ \\begin{cases}...\\end{cases} \\] or $\\begin{cases}...\\end{cases}$ — never outside math mode.
 28. Never use Unicode subscripts or superscripts (₁₂₃⁰¹²) — always use LaTeX math notation: $\\text{Ni}_3\\text{Ti}$, $\\text{CO}_2$.
 29. Never use % characters in \\section/\\subsection titles or box titles; escape special characters (&, %, #, _) in text.
 """
+
+
+
+# ── Preambolo fisso, generato dal codice (il modello scrive solo il corpo) ────
+LANG_NAMES = {"it": "Italian", "en": "English", "fr": "French", "de": "German", "es": "Spanish"}
+
+# Titoli dei box nella lingua della lezione (rilevata da Whisper); default italiano.
+BOX_TITLES = {
+    "it": {"definizione": "Definizione", "teorema": "Teorema", "esempio": "Esempio", "intuizione": "Intuizione",
+           "attenzione": "Attenzione", "sintesi": "In sintesi", "lemma": "Lemma", "corollario": "Corollario"},
+    "en": {"definizione": "Definition", "teorema": "Theorem", "esempio": "Example", "intuizione": "Intuition",
+           "attenzione": "Warning", "sintesi": "In summary", "lemma": "Lemma", "corollario": "Corollary"},
+}
+
+# lmodern: font vettoriali. Senza, con [T1]{fontenc} e senza cm-super, pdflatex ripiega sui bitmap
+# Type 3 (testo sottile/frastagliato, non copiabile). NB: il template è %-formattato: niente "%" qui.
+PREAMBLE_TEMPLATE = r"""\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs,array,multirow,tabularx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[most]{tcolorbox}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage[hyphens]{url}
+\emergencystretch=3em
+\definecolor{noteblue}{HTML}{185FA5}
+\definecolor{notebluebg}{HTML}{E6F1FB}
+\definecolor{noteteal}{HTML}{0F6E56}
+\definecolor{notetealbg}{HTML}{E1F5EE}
+\definecolor{noteamber}{HTML}{854F0B}
+\definecolor{noteamberbg}{HTML}{FAEEDA}
+\definecolor{notepurple}{HTML}{534AB7}
+\definecolor{notepurplebg}{HTML}{EEEDFE}
+\definecolor{notered}{HTML}{A32D2D}
+\definecolor{noteredbg}{HTML}{FCEBEB}
+\definecolor{notegray}{HTML}{444441}
+\definecolor{notegraybg}{HTML}{F1EFE8}
+\titleformat{\section}{\Large\bfseries\color{noteblue}}{\thesection}{1em}{}[{\color{noteblue}\titlerule[1.2pt]}]
+\titleformat{\subsection}{\large\bfseries\color{noteblue}}{\thesubsection}{1em}{}
+\newtcbtheorem[number within=section]{definizione}{%(definizione)s}{enhanced,breakable,colback=notebluebg,colframe=noteblue,colbacktitle=notebluebg,coltitle=noteblue,fonttitle=\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt}{def}
+\newtcbtheorem[number within=section]{teorema}{%(teorema)s}{enhanced,breakable,colback=notetealbg,colframe=noteteal,colbacktitle=notetealbg,coltitle=noteteal,fonttitle=\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt}{teo}
+\newtcbtheorem[number within=section]{esempio}{%(esempio)s}{enhanced,breakable,colback=noteamberbg,colframe=noteamber,colbacktitle=noteamberbg,coltitle=noteamber,fonttitle=\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt}{ex}
+\newtcolorbox{intuizione}{enhanced,breakable,colback=notepurplebg,colframe=notepurple,colbacktitle=notepurplebg,coltitle=notepurple,fonttitle=\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt,title=%(intuizione)s}
+\newtcolorbox{attenzione}{enhanced,breakable,colback=noteredbg,colframe=notered,colbacktitle=noteredbg,coltitle=notered,fonttitle=\bfseries,boxrule=0pt,leftrule=3pt,titlerule=0pt,arc=0pt,title=%(attenzione)s}
+\newtcolorbox{sintesi}{enhanced,breakable,colback=notegraybg,colframe=notegraybg,colbacktitle=notegraybg,coltitle=notegray,fonttitle=\bfseries,boxrule=0pt,titlerule=0pt,arc=2pt,title=%(sintesi)s}
+\theoremstyle{plain}
+\newtheorem{lemma}{%(lemma)s}[section]
+\newtheorem{corollario}[lemma]{%(corollario)s}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\itshape %(course)s}
+\fancyhead[R]{\small\itshape %(date)s}
+\fancyfoot[C]{\small--- \thepage\ ---}
+\renewcommand{\headrulewidth}{0.4pt}
+\setlength{\headheight}{14pt}
+\title{%(course)s}
+\author{}
+\date{%(date)s}
+"""
+
+
+def _tex_escape(t: str) -> str:
+    return re.sub(r"([&%$#_{}])", r"\\\1", t)
+
+
+def build_preamble(course_name: str, lecture_date: str, language: str | None = None) -> str:
+    titles = BOX_TITLES.get((language or "it")[:2].lower(), BOX_TITLES["en"])
+    return PREAMBLE_TEMPLATE % {**titles, "course": _tex_escape(course_name), "date": _tex_escape(lecture_date)}
+
+
+def assemble_document(body: str, course_name: str, lecture_date: str, language: str | None = None) -> str:
+    """Corpo prodotto dal modello (con o senza preambolo/\\begin{document}) → documento completo."""
+    body = body.strip()
+    if "\\begin{document}" in body:
+        body = body[body.index("\\begin{document}"):]           # scarta un eventuale preambolo del modello
+    else:
+        body = "\\begin{document}\n\\maketitle\n" + body
+    if "\\end{document}" not in body:
+        body += "\n\\end{document}\n"
+    if "\\maketitle" not in body[:400]:
+        body = body.replace("\\begin{document}", "\\begin{document}\n\\maketitle", 1)
+    return build_preamble(course_name, lecture_date, language) + "\n" + body + "\n"
 
 
 # ── OCR Filtering ─────────────────────────────────────────────────────────────
@@ -221,16 +269,23 @@ def _build_prompt(
     figures: list[dict] = None,
     rag_context: str = None,
     course_profile: str = None,
+    slides_text: str = None,
+    language: str = None,
 ) -> str:
+    lang_line = f"Language of the notes: {LANG_NAMES.get(language[:2].lower(), language)}\n" if language else ""
     prompt = f"""Convert the following lecture transcript into complete, comprehensive LaTeX notes.
 Write with a bookish, refined academic style — not a transcript dump, but polished notes a student would enjoy reading.
 Cover EVERY topic discussed — do not skip or summarise any part of the lecture.
 
 Course: {course_name}
 Date: {lecture_date}
-
+{lang_line}
 --- FULL TRANSCRIPT ---
 {transcript}
+"""
+    if re.search(r"\[\d\d:\d\d\]", transcript):
+        prompt += """(The [mm:ss] markers give the elapsed lecture time: use them only to place slides and figures
+where they were shown. Never reproduce them in the notes.)
 """
     if ocr_filtered.strip():
         prompt += f"""
@@ -238,6 +293,17 @@ Date: {lecture_date}
 (These are formulas and equations written by the professor that were NOT spoken aloud.
 Integrate them naturally into the notes where contextually appropriate.)
 {ocr_filtered}
+"""
+    if slides_text:
+        prompt += f"""
+--- LECTURE SLIDES (text extracted page by page, in order) ---
+(The transcript is the primary source for WHAT was said; the slides are the authority for HOW it is
+written: use them to correct transcription errors in technical terms, proper names, symbols and
+formulas, to recover the exact wording of definitions, and to follow the professor's own structure.
+The deck may cover more, or other, material than this lecture: use ONLY the parts that correspond to
+what was actually said. Never add a section, topic or example that appears only in the slides.
+Do not turn the notes into a copy of the slides: keep the explanatory prose of the lecture.)
+{slides_text}
 """
     if figures:
         prompt += """
@@ -256,13 +322,21 @@ Insert each figure near the section where the corresponding topic is discussed (
 
 """
         for fig in figures:
-            mins = int(fig["timestamp"] // 60)
-            secs = int(fig["timestamp"] % 60)
-            prompt += (
-                f"[{mins:02d}:{secs:02d}] latex_path={fig['latex_path']} "
-                f"caption={fig['caption']}\n"
-            )
-        prompt += "\nCRITICAL: Use ONLY the exact latex_path values listed above. Never invent or modify figure filenames.\n"
+            if "slide" in fig:
+                where = f"[{fig['deck']} · slide {fig['slide']}]" if fig.get("deck") else f"[slide {fig['slide']}]"
+                if fig.get("timestamp") is not None:
+                    where = where[:-1] + f" · shown at {int(fig['timestamp'] // 60):02d}:{int(fig['timestamp'] % 60):02d}]"
+            else:
+                mins = int(fig["timestamp"] // 60)
+                secs = int(fig["timestamp"] % 60)
+                where = f"[{mins:02d}:{secs:02d}]"
+            prompt += f"{where} latex_path={fig['latex_path']} caption={fig['caption']}\n"
+        prompt += ("\nCRITICAL: Use ONLY the exact latex_path values listed above. Never invent or modify figure filenames. "
+                   f"These are CANDIDATES, not a list to include: use at most {max(1, len(figures) // 2)} of them, and a figure only "
+                   "where the transcript explicitly discusses what it shows (a diagram, plot, scheme, organism or device the "
+                   "professor talked about). Do include the ones that match a discussed topic — the notes should have at "
+                   "least one figure whenever a candidate fits — but never justify a figure with a caption. "
+                   "Write a caption that explains what the figure shows in the context of the lecture, not the slide title.\n")
 
     if rag_context:
         prompt += f"""
@@ -515,6 +589,133 @@ def _generate_claude(
         return full_response
 
 
+# ── Claude Code CLI backend ──────────────────────────────────────────────────
+# Runs `claude -p` headless: same SYSTEM_PROMPT and prompt as the API backend,
+# but billed to the Claude subscription instead of an API key. No tools are
+# exposed, so it is a pure text-generation call.
+
+_CLAUDE_SESSION_VARS = (
+    "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ATTENDED",
+)
+
+
+def _claude_bin() -> str:
+    import shutil
+    for cand in (os.environ.get("CLAUDE_BIN"), shutil.which("claude"),
+                 str(Path.home() / ".local" / "bin" / "claude")):
+        if cand and Path(cand).exists():
+            return cand
+    raise FileNotFoundError("claude CLI not found (set CLAUDE_BIN)")
+
+
+LAST_USAGE: dict = {}          # usage dell'ultima chiamata claude -p (token, costo, modello, durata)
+USAGE_LOG = Path("output/auto/usage.jsonl")
+
+
+class ClaudeRateLimited(RuntimeError):
+    """Limite d'uso dell'abbonamento. `reset_at` = testo dell'orario di reset, se il CLI lo dice."""
+
+    def __init__(self, msg: str, reset_at: str | None = None):
+        super().__init__(msg)
+        self.reset_at = reset_at
+
+
+# "You've hit your session limit · resets 9:10pm (Europe/Rome)": non è un picco di traffico,
+# è una quota che torna a un'ora precisa. Aspettare 60/180/600 s non serve a niente.
+SESSION_LIMIT_RE = re.compile(r"(session|usage|weekly) limit.*?reset\w*\s+(?P<at>[^)]{1,40}?)(?:\s*\(|$)", re.I | re.S)
+
+
+RETRY_WAITS = (60, 180, 600)   # secondi di attesa tra i tentativi su rate limit / errori API
+
+
+def run_claude_json(prompt: str, system: str, model: str, timeout: int, tools: str = "",
+                    extra_args: list[str] | None = None) -> dict:
+    """
+    Esegue `claude -p` (JSON) e ritorna il dict di risposta. Riprova su rate limit / errori API
+    (429, 5xx, overloaded) con attese crescenti; solleva RuntimeError con il messaggio vero.
+    """
+    cmd = [_claude_bin(), "-p", "--tools", tools, "--output-format", "json",
+           "--no-session-persistence", "--model", model, "--system-prompt", system,
+           # niente server MCP: risparmia ~14k token di definizioni per chiamata e non li avvia
+           "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', *(extra_args or [])]
+    env = {k: v for k, v in os.environ.items() if k not in _CLAUDE_SESSION_VARS}
+    last_err = ""
+    for attempt in range(len(RETRY_WAITS) + 1):
+        result = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout, env=env)
+        data = None
+        try:
+            data = json.loads(result.stdout) if result.stdout.strip() else None
+        except json.JSONDecodeError:
+            data = None
+        if data is not None and result.returncode == 0 and not data.get("is_error"):
+            return data
+        msg = (str(data.get("result")) if data else "") or result.stderr.strip() or result.stdout.strip()[:300]
+        status = data.get("api_error_status") if data else None
+        last_err = f"exit {result.returncode}, api_status={status}: {msg[:400]}"
+        capped = SESSION_LIMIT_RE.search(msg)
+        if capped:
+            # quota esaurita: inutile riprovare adesso, la lezione si rifà al giro dopo
+            raise ClaudeRateLimited(f"claude -p: {last_err}", capped.group("at").strip())
+        retryable = status in (429, 500, 502, 503, 529) or re.search(
+            r"rate.?limit|overloaded|usage limit|too many requests|529|503", msg, re.I)
+        if attempt < len(RETRY_WAITS) and (retryable or (result.returncode != 0 and not msg)):
+            wait = RETRY_WAITS[attempt]
+            console.print(f"[yellow]  claude -p: {last_err[:120]} — riprovo tra {wait}s[/yellow]")
+            time.sleep(wait)
+            continue
+        break
+    raise (ClaudeRateLimited if re.search(r"rate.?limit|usage limit|429", last_err, re.I) else RuntimeError)(
+        f"claude -p: {last_err}")
+
+
+def _claude_code_call(system: str, prompt: str, model: str, timeout: int, purpose: str = "notes",
+                      effort: str | None = None) -> str:
+    t0 = time.time()
+    data = run_claude_json(prompt, system, model, timeout,
+                           extra_args=(["--effort", effort] if effort else None))
+    out = (data.get("result") or "").strip()
+    if not out:
+        raise RuntimeError("claude -p returned no output")
+
+    # contabilità: modello principale (il CLI usa anche haiku per piccole cose interne)
+    mu = data.get("modelUsage") or {}
+    main = max(mu.items(), key=lambda kv: kv[1].get("costUSD", 0))[0] if mu else model
+    u = data.get("usage") or {}
+    LAST_USAGE.clear()
+    LAST_USAGE.update({
+        "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "purpose": purpose, "model": main,
+        "in": u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0) + u.get("cache_read_input_tokens", 0),
+        "cache_read": u.get("cache_read_input_tokens", 0), "cache_write": u.get("cache_creation_input_tokens", 0),
+        "out": u.get("output_tokens", 0),
+        "thinking": (u.get("output_tokens_details") or {}).get("thinking_tokens", 0),
+        "effort": effort or "default",
+        "cost_usd": round(data.get("total_cost_usd") or 0, 4),
+        "seconds": round(time.time() - t0), "chars": len(out),
+    })
+    try:
+        USAGE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(USAGE_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(LAST_USAGE) + "\n")
+    except OSError:
+        pass
+    return out
+
+
+def _generate_claude_code(prompt: str, model: str = "sonnet", timeout: int = 1800,
+                          effort: str | None = None, system: str | None = None,
+                          lecture_minutes: float | None = None) -> str:
+    console.print(f"[cyan]Generating notes via Claude Code CLI (model={model}, effort={effort or 'default'})...[/cyan]")
+    # NB: effort low/medium azzera il thinking ma condensa le note (-22%/-48% di prosa, tabelle perse):
+    # misurato il 2026-09-16, incompatibile con la completezza richiesta. Lasciato come opzione esplicita.
+    out = _claude_code_call(system or SYSTEM_PROMPT, prompt, model, timeout, purpose="notes", effort=effort)
+    u = LAST_USAGE
+    console.print(f"[dim]  {u.get('model')}: {u.get('in')} in (cache {u.get('cache_read')}) / {u.get('out')} out "
+                  f"(thinking {u.get('thinking')}) tokens, ${u.get('cost_usd')} eq, {u.get('seconds')}s, {len(out)} chars[/dim]")
+    return out
+
+
 def _generate_ollama(prompt: str, model: str = "mistral", host: str = "http://localhost:11434") -> str:
     import ollama
     console.print(f"[cyan]Generating notes via Ollama ({model})...[/cyan]")
@@ -565,6 +766,15 @@ def _call_backend(
             transcript=transcript,
             merged_data=merged_data,
             figures=figures,
+        )
+    elif backend == "claude-code":
+        return _generate_claude_code(
+            prompt,
+            model=cfg.get("model", "sonnet"),
+            timeout=cfg.get("timeout", 1800),
+            effort=cfg.get("effort"),
+            system=cfg.get("_system_prompt"),
+            lecture_minutes=cfg.get("_lecture_minutes"),
         )
     elif backend == "ollama":
         return _generate_ollama(
@@ -633,6 +843,13 @@ def _auto_fix_latex(
 
     console.print("[cyan]Attempting auto-fix of LaTeX errors...[/cyan]")
 
+    # 1) patch minima (poche centinaia di token in uscita invece di riscrivere ~20k token di documento)
+    if backend == "claude-code":
+        patched = _patch_fix_latex(latex_content, errors, cfg)
+        if patched:
+            return patched
+        console.print("[yellow]  Patch non applicabile: riscrittura completa[/yellow]")
+
     try:
         if backend == "claude":
             import anthropic
@@ -651,6 +868,12 @@ def _auto_fix_latex(
             ) as stream:
                 for text in stream.text_stream:
                     fixed += text
+            return _clean_latex(fixed)
+        elif backend == "claude-code":
+            fixed = _claude_code_call(
+                "You are a LaTeX expert. Fix the compilation errors and return the complete corrected .tex file. Output ONLY the LaTeX code, nothing else.",
+                fix_prompt, cfg.get("model", "sonnet"), cfg.get("timeout", 1800), purpose="latex-fix",
+            )
             return _clean_latex(fixed)
         elif backend == "openai":
             from openai import OpenAI
@@ -673,6 +896,49 @@ def _auto_fix_latex(
     except Exception as e:
         console.print(f"[yellow]⚠ Auto-fix API call failed: {e}[/yellow]")
         return None
+
+
+PATCH_SYSTEM = ("You are a LaTeX expert. You receive a document and its pdflatex errors. Reply ONLY with a JSON "
+                "array of minimal edits, each {\"find\": <exact substring of the document, 1-3 lines, unique>, "
+                "\"replace\": <corrected text>}. Fix only the listed errors; never rewrite or reflow other content; "
+                "never change wording, only LaTeX syntax. No prose, no code fences.")
+
+
+def _patch_fix_latex(latex: str, errors: str, cfg: dict, system: str = PATCH_SYSTEM,
+                     purpose: str = "latex-patch", full_document: bool = True) -> str | None:
+    """Chiede a Claude solo le sostituzioni minime e le applica; None se non applicabili.
+    full_document=False manda solo gli estratti in `errors` (le righe sorgente ci sono già)."""
+    prompt = f"ERRORS:\n{errors}\n\nDOCUMENT:\n{latex}" if full_document else f"PASSAGES:\n{errors}"
+    try:
+        raw = _claude_code_call(system, prompt, cfg.get("model", "sonnet"), cfg.get("timeout", 1800),
+                                purpose=purpose)
+        m = re.search(r"\[.*\]", raw, re.S)
+        edits = json.loads(m.group(0)) if m else None
+    except Exception as e:
+        console.print(f"[yellow]  Patch fix failed: {type(e).__name__}: {str(e)[:120]}[/yellow]")
+        return None
+    if not isinstance(edits, list) or not edits:
+        return None
+    out = latex
+    applied = 0
+    for e in edits:
+        f, r = e.get("find", ""), e.get("replace", "")
+        if not full_document:      # gli estratti hanno il numero di riga davanti: "123: ..."
+            f = re.sub(r"(?m)^\d+: ", "", f)
+            r = re.sub(r"(?m)^\d+: ", "", r)
+        if not f or out.count(f) != 1:
+            continue
+        out = out.replace(f, r, 1)
+        applied += 1
+    if applied == 0:
+        return None
+    # la patch non deve toccare il contenuto: il testo fuori dal LaTeX deve restare (quasi) identico
+    before, after = re.sub(r"\\[a-zA-Z]+|[{}$\\]", "", latex), re.sub(r"\\[a-zA-Z]+|[{}$\\]", "", out)
+    if abs(len(after) - len(before)) > 0.02 * len(before):
+        console.print("[yellow]  Patch scartata: modifica il contenuto oltre la soglia[/yellow]")
+        return None
+    console.print(f"[cyan]  Applied {applied}/{len(edits)} LaTeX patch edit(s)[/cyan]")
+    return out
 
 
 def _repair_figure_paths(latex: str, output_dir: Path) -> str:
@@ -748,6 +1014,179 @@ def _repair_figure_paths(latex: str, output_dir: Path) -> str:
     return out
 
 
+# macro non definite → pacchetto che le fornisce (fix senza LLM)
+_MACRO_PACKAGES = {
+    "booktabs": ("toprule", "midrule", "bottomrule", "cmidrule", "addlinespace"),
+    "multirow": ("multirow",),
+    "siunitx": ("SI", "si", "num", "qty", "unit"),
+    "gensymb": ("degree", "celsius", "ohm", "micro"),
+    "textcomp": ("texteuro", "textcelsius", "textdegree"),
+    "mathtools": ("coloneqq", "prescript", "DeclarePairedDelimiter"),
+    "cancel": ("cancel", "bcancel", "xcancel"),
+    "bm": ("bm",),
+    "physics": ("dv", "pdv", "qty", "abs", "norm", "grad", "curl", "div"),
+    "subcaption": ("subfigure", "subcaption"),
+    "float": ("newfloat", "floatstyle"),
+}
+
+
+def _quick_fix_latex(latex: str, errors: str) -> str | None:
+    """
+    Fix deterministici prima di scomodare l'LLM:
+      - "File `X.sty' not found" → toglie X dai \\usepackage (e prova a installarlo con tlmgr per la prossima volta)
+      - "Undefined control sequence" di macro note → aggiunge il pacchetto che le fornisce
+    None se non applicabile.
+    """
+    missing = re.findall(r"File `([^']+)\.sty' not found", errors)
+    if missing:
+        def _strip(m: "re.Match") -> str:
+            opts, pkgs = m.group(1) or "", m.group(2)
+            keep = [x.strip() for x in pkgs.split(",") if x.strip() and x.strip() not in missing]
+            if keep == [x.strip() for x in pkgs.split(",") if x.strip()]:
+                return m.group(0)                      # riga senza pacchetti mancanti: intatta
+            return f"\\usepackage{opts}{{{','.join(keep)}}}" if keep else ""
+
+        fixed = re.sub(r"\\usepackage(\[[^\]]*\])?\{([^}]*)\}", _strip, latex)
+        for pkg in missing:                            # per la prossima volta
+            try:
+                subprocess.run(["tlmgr", "install", pkg], capture_output=True, timeout=120)
+            except Exception:
+                pass
+        console.print(f"[cyan]  Removed missing package(s) {missing} from the preamble[/cyan]")
+        return fixed if fixed != latex else None
+    if "Undefined control sequence" not in errors:
+        return None
+    undefined = set(re.findall(r"\\([A-Za-z]+)", errors))
+    needed = [pkg for pkg, macros in _MACRO_PACKAGES.items()
+              if any(m in undefined for m in macros) and not re.search(r"\\usepackage(\[[^\]]*\])?\{[^}]*\b" + pkg + r"\b", latex)]
+    if not needed:
+        return None
+    line = "\\usepackage{" + ",".join(needed) + "}\n"
+    m = re.search(r"\\usepackage\{amsmath[^}]*\}\n", latex)
+    if m:
+        return latex[:m.end()] + line + latex[m.end():]
+    m = re.search(r"\\documentclass[^\n]*\n", latex)
+    return latex[:m.end()] + line + latex[m.end():] if m else None
+
+
+TEXT_COLS = 82          # caratteri per riga a 11pt con margini 2.5 cm su A4 (~455pt): oltre, la tabella sborda
+
+
+def _fix_wide_tables(latex: str) -> str:
+    """
+    tabular con celle di prosa → tabularx a \textwidth con colonne X: LaTeX non manda a capo
+    le colonne l/c, quindi una tabella "aspetto / opzione A / opzione B" con frasi intere esce
+    dalla pagina (successo il 17/09/2026: tre tabelle su tre). Stima della larghezza = somma,
+    per colonna, della cella più lunga; sopra TEXT_COLS si convertono in X le colonne la cui
+    cella più lunga supera 20 caratteri (le etichette corte restano l).
+    """
+    def cells_of(body: str) -> list[list[str]]:
+        rows = []
+        for line in re.split(r"\\\\", body):
+            line = re.sub(r"\\(toprule|midrule|bottomrule|hline|cline\{[^}]*\})", "", line).strip()
+            if line:
+                rows.append([c.strip() for c in line.split("&")])
+        return rows
+
+    def repl(m: re.Match) -> str:
+        spec, body = m.group(1), m.group(2)
+        cols = re.findall(r"[lcr]|p\{[^}]*\}|X", spec.replace("|", ""))
+        rows = cells_of(body)
+        if not rows or not cols or "X" in cols:
+            return m.group(0)
+        n = len(cols)
+        longest = [max((len(re.sub(r"\\[a-zA-Z]+\*?(\[[^]]*\])?(\{[^}]*\})?", "", r[i])) for r in rows if i < len(r)), default=0)
+                   for i in range(n)]
+        if sum(longest) + 3 * n <= TEXT_COLS:
+            return m.group(0)
+        new_cols = ["X" if (c in ("l", "c", "r") and longest[i] > 20) else c for i, c in enumerate(cols)]
+        if "X" not in new_cols:
+            return m.group(0)
+        return f"\\begin{{tabularx}}{{\\textwidth}}{{{''.join(new_cols)}}}{body}\\end{{tabularx}}"
+
+    return re.sub(r"\\begin\{tabular\}\{([^}]*)\}(.*?)\\end\{tabular\}", repl, latex, flags=re.S)
+
+
+LAST_LAYOUT: dict = {}         # esito dell'ultimo controllo di impaginazione (compile_pdf)
+
+_OVERFULL_RE = re.compile(r"Overfull \\hbox \(([\d.]+)pt too wide\) "
+                          r"(?:in paragraph at lines (\d+)--(\d+)|in alignment at lines (\d+)--(\d+)|detected at line (\d+))")
+
+
+def _layout_problems(log_path: Path, tex_path: Path, min_pt: float = 5.0, context: int = 1) -> list[dict]:
+    """Overfull del log con le righe sorgente del .tex a cui si riferiscono (per la patch)."""
+    if not log_path.exists() or not tex_path.exists():
+        return []
+    src = tex_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    out, seen = [], set()
+    for m in _OVERFULL_RE.finditer(log_path.read_text(errors="replace")):
+        pt = float(m.group(1))
+        if pt < min_pt:
+            continue
+        nums = [int(x) for x in m.groups()[1:] if x]
+        a, b = (nums[0], nums[-1]) if nums else (0, 0)
+        if not a or (a, b) in seen:
+            continue
+        seen.add((a, b))
+        lo, hi = max(1, a - context), min(len(src), b + context)
+        out.append({"pt": pt, "lines": (a, b),
+                    "source": "\n".join(f"{i}: {src[i - 1]}" for i in range(lo, hi + 1))})
+    return out
+
+
+LAYOUT_PATCH_SYSTEM = (
+    "You are a LaTeX expert. You receive passages of a document that run past the right margin "
+    "(pdflatex 'Overfull hbox', with how many points they exceed) and must make each fit with the "
+    "smallest LaTeX edit: split a long display formula across lines (align, multline, \\\\ breaks), "
+    "turn a long inline formula into display math, insert \\allowbreak or a hyphenation hint (\\-) "
+    "in a long word, wrap a bare URL in \\url{...}, replace a fixed-width tabular with tabularx X "
+    "columns. Never change the wording or drop anything. Reply ONLY with a JSON array of edits, each "
+    "{\"find\": <exact substring of the passage, 1-3 lines, unique in the document>, "
+    "\"replace\": <edited text>}. No prose, no code fences."
+)
+
+
+def _patch_layout(latex: str, problems: list[dict], cfg: dict) -> str | None:
+    """Patch LLM per i passaggi che escono dal margine (solo gli estratti: poche centinaia di token)."""
+    report = "\n\n".join(f"--- {p['pt']:.0f}pt too wide, .tex lines {p['lines'][0]}-{p['lines'][1]} ---\n{p['source']}"
+                           for p in problems[:12])
+    return _patch_fix_latex(latex, report, cfg, system=LAYOUT_PATCH_SYSTEM, purpose="layout-patch",
+                            full_document=False)
+
+
+def _layout_check(log_path: Path, min_pt: float = 5.0) -> dict:
+    """Conta gli "Overfull hbox" del log di pdflatex sopra min_pt: righe/tabelle che escono dal margine."""
+    out = {"overfull": 0, "worst_pt": 0.0}
+    if not log_path.exists():
+        return out
+    for m in re.finditer(r"Overfull \\hbox \(([\d.]+)pt too wide", log_path.read_text(errors="replace")):
+        pt = float(m.group(1))
+        if pt >= min_pt:
+            out["overfull"] += 1
+            out["worst_pt"] = max(out["worst_pt"], pt)
+    return out
+
+
+def _drop_missing_figures(latex: str, output_dir: Path) -> str:
+    """Rimuove i blocchi figure il cui file non esiste (pdflatex li renderebbe come box vuoti)."""
+    pattern = re.compile(r"\\begin\{figure\}.*?\\end\{figure\}", re.S)
+    dropped = []
+
+    def _check(m: "re.Match") -> str:
+        block = m.group(0)
+        for g in re.finditer(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]*)\}", block):
+            path = g.group(1).strip()
+            if not (output_dir / path).exists() and not Path(path).exists():
+                dropped.append(path)
+                return ""
+        return block
+
+    out = pattern.sub(_check, latex)
+    if dropped:
+        console.print(f"[yellow]  Dropped {len(dropped)} figure(s) with missing files: {dropped[:3]}[/yellow]")
+    return out
+
+
 def compile_pdf(
     tex_path: Path,
     pdf_output_dir: Path,
@@ -780,15 +1219,27 @@ def compile_pdf(
                     error_lines = []
                     if log_path.exists():
                         log_text = log_path.read_text(encoding="utf-8", errors="replace")
-                        for line in log_text.splitlines():
+                        lines = log_text.splitlines()
+                        for i, line in enumerate(lines):
                             if line.startswith("!"):
-                                error_lines.append(line)
+                                ctx = next((l for l in lines[i + 1:i + 6] if l.startswith("l.")), "")
+                                error_lines.append(f"{line}  {ctx}".rstrip())
                     return False, "\n".join(error_lines) if error_lines else "Unknown compilation error"
             return True, ""
         except FileNotFoundError:
             return False, "pdflatex not found"
 
     success, errors = _run_pdflatex()
+
+    if not success and errors != "pdflatex not found":
+        original = tex_path.read_text(encoding="utf-8")
+        quick = _quick_fix_latex(original, errors)
+        if quick and quick != original:
+            tex_path.write_text(quick, encoding="utf-8")
+            console.print("[cyan]Retrying compilation after deterministic fix (missing packages)...[/cyan]")
+            success, errors = _run_pdflatex()
+            if not success:
+                tex_path.write_text(original, encoding="utf-8")
 
     if not success and auto_fix and errors != "pdflatex not found":
         console.print(f"[yellow]⚠ LaTeX compilation failed. Errors:[/yellow]")
@@ -823,6 +1274,28 @@ def compile_pdf(
     pdf_filename = _make_pdf_filename(course_name, lecture_date, suffix)
     final_pdf = pdf_output_dir / pdf_filename
 
+    LAST_LAYOUT.clear()
+    LAST_LAYOUT.update(_layout_check(tex_path.with_suffix(".log")), fixed=0)
+    if LAST_LAYOUT["overfull"] and auto_fix and backend == "claude-code":
+        # righe/formule/URL oltre il margine: patch minima dal modello, tenuta solo se migliora
+        problems = _layout_problems(tex_path.with_suffix(".log"), tex_path)
+        console.print(f"[cyan]Layout: {len(problems)} passage(s) beyond the margin — asking for a patch...[/cyan]")
+        before_tex = tex_path.read_text(encoding="utf-8")
+        patched = _patch_layout(before_tex, problems, backend_config or {}) if problems else None
+        if patched:
+            tex_path.write_text(patched, encoding="utf-8")
+            ok, _ = _run_pdflatex()
+            after = _layout_check(tex_path.with_suffix(".log")) if ok else None
+            if ok and after["overfull"] < LAST_LAYOUT["overfull"]:
+                LAST_LAYOUT.update(after, fixed=LAST_LAYOUT["overfull"] - after["overfull"])
+            else:
+                tex_path.write_text(before_tex, encoding="utf-8")
+                _run_pdflatex()
+                console.print("[yellow]  Layout patch did not help: kept the original[/yellow]")
+    if LAST_LAYOUT["overfull"]:
+        console.print(f"[yellow]⚠ Layout: {LAST_LAYOUT['overfull']} overfull box(es), "
+                      f"worst {LAST_LAYOUT['worst_pt']:.0f}pt beyond the margin[/yellow]")
+
     import shutil
     shutil.copy2(compiled_pdf, final_pdf)
     compiled_pdf.unlink()
@@ -855,13 +1328,30 @@ def generate_notes(
     backend_config: dict = None,
     compile_pdf_flag: bool = True,
     transcript_path: Path = None,
+    transcript_text: str = None,
     pdf_output_dir: Path = None,
     figures: list[dict] = None,
     suffix: str = None,
     rag_context: str = None,
+    slides_text: str = None,
+    language: str = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     cfg = backend_config or {}
+    lecture_minutes = None
+    if transcript_path is not None:
+        seg = transcript_path.with_name(transcript_path.stem + "_segments.json")
+        if seg.exists():
+            try:
+                segd = json.loads(seg.read_text(encoding="utf-8"))
+                language = language or segd.get("language")
+                if segd.get("segments"):
+                    lecture_minutes = segd["segments"][-1]["end"] / 60
+            except Exception:
+                pass
+    if lecture_minutes is None and transcript_path is not None:
+        lecture_minutes = len(transcript_path.read_text(encoding="utf-8").split()) / 125   # ~125 parole/min parlate
+    cfg = dict(cfg, _lecture_minutes=lecture_minutes)
 
     if pdf_output_dir is None:
         pdf_output_dir = output_dir.parent / "notes"
@@ -884,7 +1374,10 @@ def generate_notes(
 
     # ── Load full transcript ──────────────────────────────────────────────────
     full_transcript = ""
-    if transcript_path and transcript_path.exists():
+    if transcript_text:
+        full_transcript = transcript_text            # es. con marcatori [mm:ss] (tools/nightly.py)
+        console.print(f"[dim]Transcript given: {len(full_transcript.split())} words[/dim]")
+    elif transcript_path and transcript_path.exists():
         full_transcript = transcript_path.read_text(encoding="utf-8")
         console.print(f"[dim]Loaded transcript: {len(full_transcript.split())} words[/dim]")
     else:
@@ -929,11 +1422,19 @@ def generate_notes(
     if course_profile:
         console.print(f"[dim]Course profile loaded for '{course_name}'[/dim]")
 
+    # claude-code: la scheda corso va nel system prompt (stabile per corso → cache hit tra lezioni
+    # consecutive); nel messaggio utente resterebbe dietro la trascrizione, mai riusabile.
+    if backend == "claude-code" and course_profile:
+        cfg = dict(cfg, _system_prompt=SYSTEM_PROMPT + "\n\n--- COURSE STYLE GUIDE ---\n"
+                   "(Terminology, notation and LaTeX conventions for this course. Follow them strictly so "
+                   "notation stays consistent across all lectures.)\n" + course_profile + "\n")
+        course_profile = None
+
     if len(words) <= MAX_WORDS_PER_CHUNK:
         console.print(f"  Chunk 1/1...")
         prompt = _build_prompt(
             full_transcript, filtered_ocr, course_name, lecture_date,
-            figures, rag_context, course_profile,
+            figures, rag_context, course_profile, slides_text, language,
         )
         raw = _call_backend(
             prompt, backend, cfg,
@@ -960,6 +1461,8 @@ def generate_notes(
                 figures if i == 0 else None,
                 rag_context if i == 0 else None,
                 course_profile,
+                slides_text if i == 0 else None,
+                language,
             )
             raw = _call_backend(
                 prompt, backend, cfg,
@@ -971,9 +1474,19 @@ def generate_notes(
             latex_sections.append(_clean_latex(raw))
         final_latex = _merge_latex_chunks(latex_sections)
 
+    # La risposta grezza va su disco PRIMA di qualsiasi post-elaborazione: un bug dopo la
+    # chiamata (è successo) non deve costare una seconda chiamata al modello
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "lecture_notes_raw.tex").write_text(final_latex, encoding="utf-8")
+
+    # Il preambolo lo mettiamo noi: meno token in uscita e nessun errore di preambolo
+    final_latex = assemble_document(final_latex, course_name, lecture_date, language)
+
     # Repair figure paths that the LLM may have mangled (whitespace, etc.)
     # so pdflatex actually embeds them instead of silently using draft mode.
     final_latex = _repair_figure_paths(final_latex, output_dir)
+    final_latex = _drop_missing_figures(final_latex, output_dir)
+    final_latex = _fix_wide_tables(final_latex)
 
     # Always save .tex to output/latex/ (overwritten each time)
     tex_path = output_dir / "lecture_notes.tex"
@@ -986,7 +1499,8 @@ def generate_notes(
         from src.course_profiles import _slugify
         course_dir = Path("output/course") / _slugify(course_name)
         course_dir.mkdir(parents=True, exist_ok=True)
-        archive_path = course_dir / f"{lecture_date}_{stem}.tex"
+        archive_name = f"{stem}.tex" if stem.startswith(lecture_date) else f"{lecture_date}_{stem}.tex"
+        archive_path = course_dir / archive_name
         archive_path.write_text(final_latex, encoding="utf-8")
         console.print(f"[dim]Archived for course build: {archive_path}[/dim]")
     except Exception as e:

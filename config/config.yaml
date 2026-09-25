@@ -13,7 +13,10 @@ download:
 
 transcription:
   model: "medium"        # faster-whisper model
-  language: null         # null = auto-detect
+  language: null         # null = auto; forzabile per corso con auto.courses[].language
+  language_candidates: ["it", "en"]   # con language null: la lingua è scelta tra queste per confidenza di
+                                      # decodifica su 3 finestre (il rilevatore di Whisper scambia per "it"
+                                      # un docente italiano che parla inglese); [] = rilevatore di Whisper
   device: "cuda"
   output_dir: "output/transcripts"
 
@@ -35,7 +38,10 @@ ocr:
 # single cohesive PDF with:  python -m src.course_builder "Course Name"
 # (add --no-polish to skip the Claude cohesion pass between chapters)
 notes:
-  backend: "claude"
+  language: "en"            # lingua degli appunti: lecture = quella della lezione (rilevata da Whisper), oppure it / en
+                            # (per corso: auto.courses[].notes_language)
+  backend: "claude-code"    # claude-code = `claude -p` (abbonamento Claude Code, nessuna API key)
+                            # claude = Anthropic API (ANTHROPIC_API_KEY) / ollama / openai
   use_tools: false          # true = enable Claude tool use for transcript/OCR/figure lookup
   auto_fix_latex: true      # true = auto-retry LaTeX compilation with LLM error fixing
 
@@ -43,6 +49,11 @@ notes:
     model: "claude-sonnet-4-6"
     api_key: ""          # Or set env var ANTHROPIC_API_KEY
     max_tokens: 64000
+
+  claude-code:
+    model: "sonnet"      # alias CLI: sonnet / opus / fable, o un model id completo
+    timeout: 1800        # secondi per chiamata
+    # effort: medium     # low/medium/high: controlla il thinking (default del CLI se omesso)
 
   ollama:
     model: "mistral"
@@ -75,3 +86,41 @@ rag:
   n_results: 5             # Number of passages to retrieve
   chunk_size: 500          # Words per chunk when indexing
   chunk_overlap: 50        # Word overlap between chunks
+
+# ── Job notturno (tools/nightly.py, timer systemd) ────────────────────────────
+auto:
+  courses:                       # corsi da seguire nell'Archivio registrazioni
+    - name: "BIOINSPIRED ROBOTICS"   # nome usato per scheda corso e titolo delle note
+      match: "BIOINSPIRED"           # filtro campo "Corso" dell'archivio (nome o codice)
+      slides_links:                  # moduli url di WeBeep (o link OneDrive) con le slide: scaricati ogni notte
+        - "https://webeep.polimi.it/mod/url/view.php?id=488848"
+      # model: opus                  # override del modello per questo corso (default: notes.claude-code.model)
+      # aa: 2025                     # anno di inizio A.A.; omesso = A.A. corrente
+                                     # (decommenta per recuperare il 25/26: 6 lezioni ≈ 1.5 GB, ~30 min GPU, 6 chiamate a Claude)
+    - name: "LAB - MECHATRONICS"      # = nome cartella di WeBeep Sync in slides_dir
+      match: "LAB - MECHATRONICS"     # sottostringa del campo "Corso" dell'archivio (meglio il codice, es. "0612xx", se lo conosci)
+    - name: "VISION BASED 3D MEASUREMENTS"
+      match: "VISION BASED 3D"
+      # language: en                 # lingua della lezione se la scelta automatica sbaglia
+    - name: "MACHINE LEARNING FOR MECHANICAL SYSTEMS"
+      match: "MACHINE LEARNING FOR MECHANICAL"
+      # slides_links:                # se il docente pubblica le slide come link OneDrive: incolla qui il link WeBeep
+      #   - "https://webeep.polimi.it/mod/url/view.php?id=XXXXXX"
+  kind: null                     # forma didattica: null = tutte, oppure LE lezione / LA lab / ES esercitazione / OT
+  state_file: "output/auto/state.json"
+  log_file: "output/auto/nightly.log"
+  keep_videos: false             # false = cancella l'mp4 quando il PDF degli appunti esiste (prima resta, per poter ritrascrivere)
+  cleanup: true                  # dopo le note: mp4 (vedi sopra), .aux/.log LaTeX, provini triage, cache slide obsolete
+  notify: true                   # notify-send per login richiesto / errori
+  max_failures: 3                # dopo N fallimenti di uno stadio la lezione viene saltata
+  slides_dir: "~/Scrivania/POLI"          # cartella di WeBeep Sync (o qualsiasi <dir>/<NOME CORSO>/**/*.pdf)
+  notes_subdir: "Appunti"        # il PDF viene copiato in <slides_dir>/<NOME CORSO>/<notes_subdir>/
+                                 # (output/notes resta la copia di riferimento: è quella che segna "già fatto")
+  slides: true                   # cerca le slide della lezione: glossario per Whisper, testo + figure per gli appunti
+  slides_max_mb: 2000            # non scaricare dai link file più grandi di così
+  slides_max_figures: 8          # figure candidate offerte al modello (le più pertinenti alla trascrizione)
+  slides_max_decks: 3            # una lezione può usare più deck (finire uno e iniziare il successivo)
+  slides_video: true             # riconosce nei frame del video quali slide sono state mostrate e quando (1 frame/5 s,
+                                 # ~1 min CPU per ora di video); senza match si ripiega sulla trascrizione
+  slides_triage: true            # provino + Haiku (vision) per scartare sfondi/ritratti/screenshot e dare didascalie (~$0.05/deck)
+  slides_triage_model: "haiku"

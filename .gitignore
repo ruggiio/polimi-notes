@@ -25,3 +25,6 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Persistent browser profile (session cookies)
+config/chrome_profile/

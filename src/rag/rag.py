@@ -1,7 +1,8 @@
 """
 rag.py — Course-level RAG (Retrieval-Augmented Generation) for lecture context
 
-Uses ChromaDB for vector storage and sentence-transformers for embeddings.
+Uses ChromaDB for vector storage. Embeddings: sentence-transformers (all-MiniLM-L6-v2) if
+installed, otherwise ChromaDB's bundled ONNX version of the same model (no torch needed).
 Allows querying previous lectures to provide context for notes generation.
 """
 
@@ -25,12 +26,6 @@ class CourseRAG:
             raise ImportError(
                 "chromadb is required for RAG. Install it with: pip install chromadb"
             )
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError:
-            raise ImportError(
-                "sentence-transformers is required for RAG. Install it with: pip install sentence-transformers"
-            )
 
         self.db_path = Path(db_path)
         self.db_path.mkdir(parents=True, exist_ok=True)
@@ -38,7 +33,14 @@ class CourseRAG:
         self.chunk_overlap = chunk_overlap
 
         self.client = chromadb.PersistentClient(path=str(self.db_path))
-        self.model = SentenceTransformer("all-MiniLM-L6-v2")
+        try:
+            from sentence_transformers import SentenceTransformer
+            model = SentenceTransformer("all-MiniLM-L6-v2")
+            self._embed = lambda texts: model.encode(texts).tolist()
+        except ImportError:
+            from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+            ef = DefaultEmbeddingFunction()          # all-MiniLM-L6-v2 via onnxruntime, CPU
+            self._embed = lambda texts: [list(map(float, v)) for v in ef(texts)]
 
     def _get_collection(self, course_name: str):
         """Get or create a ChromaDB collection for a course."""
@@ -84,7 +86,7 @@ class CourseRAG:
             return 0
 
         # Generate embeddings
-        embeddings = self.model.encode(chunks).tolist()
+        embeddings = self._embed(chunks)
 
         # Create unique IDs based on course, date, and chunk index
         ids = [
@@ -119,12 +121,16 @@ class CourseRAG:
 
     def query_context(
         self,
-        query_text: str,
+        query_text: str | list[str],
         course_name: str,
         n_results: int = 5,
+        exclude_date: str | None = None,
     ) -> str:
         """
         Query the RAG database for relevant context from previous lectures.
+        query_text may be a list (e.g. samples from the start, middle and end of the lecture):
+        results are merged by distance, one entry per chunk. exclude_date leaves out the
+        lecture being generated (already indexed when notes are regenerated).
         Returns a formatted string of relevant passages with their lecture date.
         """
         collection = self._get_collection(course_name)
@@ -132,18 +138,29 @@ class CourseRAG:
         if collection.count() == 0:
             return ""
 
-        query_embedding = self.model.encode([query_text]).tolist()
-
+        queries = [query_text] if isinstance(query_text, str) else [q for q in query_text if q.strip()]
+        if not queries:
+            return ""
+        kwargs = {"where": {"lecture_date": {"$ne": exclude_date}}} if exclude_date else {}
         results = collection.query(
-            query_embeddings=query_embedding,
+            query_embeddings=self._embed(queries),
             n_results=min(n_results, collection.count()),
+            **kwargs,
         )
 
-        if not results["documents"] or not results["documents"][0]:
+        best: dict[str, tuple[float, str, dict]] = {}
+        for ids, docs, metas, dists in zip(results["ids"], results["documents"], results["metadatas"], results["distances"]):
+            for i, doc, meta, dist in zip(ids, docs, metas, dists):
+                if i not in best or dist < best[i][0]:
+                    best[i] = (dist, doc, meta)
+        if not best:
             return ""
+        top = sorted(best.values(), key=lambda x: x[0])[:n_results]
+        # in ordine di lezione e di posizione, così il contesto si legge come materiale del corso
+        top.sort(key=lambda x: (x[2].get("lecture_date", ""), x[2].get("chunk_index", 0)))
 
         passages = []
-        for doc, metadata in zip(results["documents"][0], results["metadatas"][0]):
+        for _, doc, metadata in top:
             date = metadata.get("lecture_date", "unknown")
             source = metadata.get("source", "transcript")
             passages.append(f"[Lecture {date}, {source}]\n{doc}")
@@ -151,6 +168,15 @@ class CourseRAG:
         context = "\n\n---\n\n".join(passages)
         console.print(f"[dim]RAG: retrieved {len(passages)} passages from previous lectures[/dim]")
         return context
+
+    def is_indexed(self, course_name: str, lecture_date: str, source: str = "transcript") -> bool:
+        """True if at least one chunk of that lecture is in the index."""
+        try:
+            got = self._get_collection(course_name).get(
+                where={"$and": [{"lecture_date": lecture_date}, {"source": source}]}, limit=1)
+            return bool(got["ids"])
+        except Exception:
+            return False
 
     def add_from_pdf(self, pdf_path: Path, course_name: str) -> int:
         """
