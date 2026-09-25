@@ -369,6 +369,12 @@ Archivio registrazioni PoliMi ──fetch──▶ output/videos/*.mp4 ──tra
 .venv/bin/python tools/sso_login.py
 ```
 
+Se la sessione è ancora valida il portale si apre già autenticato e lo script esce senza rinnovare nulla. Per rinnovarla in anticipo (es. prima di qualche giorno senza accesso al PC) usa `--force`: cancella prima i cookie `*.polimi.it` del profilo e costringe a rifare password + CIE, così i 10 giorni ripartono da oggi.
+
+```bash
+.venv/bin/python tools/sso_login.py --force
+```
+
 ### Setup
 
 ```bash
@@ -393,7 +399,10 @@ auto:
   kind: null                          # null = tutte le forme didattiche
   keep_videos: false                  # mp4 cancellato dal cleanup quando il PDF esiste
   cleanup: true
+  notes_subdir: "Appunti"             # copia del PDF in <slides_dir>/<CORSO>/Appunti/ ("" = disattivato)
 ```
+
+**Dove finiscono gli appunti.** Il PDF viene scritto in `output/notes/` e copiato nella cartella del corso accanto alle slide, in `<slides_dir>/<NOME CORSO>/<notes_subdir>/` (default `Appunti`; cartella esclusa dalla ricerca dei deck). La copia di riferimento è quella in `output/notes`: è la sua esistenza a segnare la lezione come fatta, quindi spostare o rinominare gli appunti nella cartella del corso non fa rigenerare nulla.
 
 ### Uso manuale
 
@@ -407,6 +416,8 @@ systemctl --user start polimi-notes-nightly.service; tail -f output/auto/nightly
 
 Stato e fallimenti in `output/auto/state.json` (uno stadio che fallisce 3 volte viene saltato). Sonda diagnostica del flusso SSO: `tools/sso_probe.py`.
 
+**Limite d'uso dell'abbonamento.** Un messaggio del tipo "session/usage/weekly limit · resets 9:10pm" non è un picco di traffico: il job non ritenta (il backoff 60/180/600 s resta solo per 429 transitori, overloaded e 5xx), registra l'orario di reset, manda una notifica e **interrompe lo stadio notes**, perché le lezioni successive troverebbero lo stesso limite. Il limite d'uso **non conta come fallimento della lezione** (altrimenti dopo `max_failures` verrebbe saltata per sempre): le lezioni rimaste vengono riprese al giro successivo. Lo stesso vale per il triage delle figure: un triage interrotto non viene salvato in cache come definitivo e viene rifatto al run dopo.
+
 **Contesto di corso (RAG).** Con `rag.enabled: true` il job, prima di generare gli appunti, cerca in `output/rag` (ChromaDB; embedding all-MiniLM-L6-v2 in versione ONNX inclusa in chromadb, niente torch) i passaggi delle lezioni precedenti dello stesso corso più vicini a inizio/metà/fine della trascrizione e li passa nel prompt come "context from course material" (`rag.n_results` passaggi da `rag.chunk_size` parole, ≈3k token); dopo il PDF il transcript viene indicizzato (upsert per corso+data+chunk, quindi idempotente; la lezione in corso è esclusa dalla ricerca). I transcript con PDF ma non ancora indicizzati vengono recuperati al giro successivo.
 
 **Lingua della lezione.** Il rilevatore di Whisper si fa ingannare dall'accento: un docente italiano che fa lezione in inglese viene rilevato `it` (p ≈ 0.8 su ogni finestra) e la decodifica produce una pseudo-traduzione. Con `transcription.language: null` la lingua è scelta tra `transcription.language_candidates` (default `[it, en]`) decodificando 3 finestre di 30 s con ciascuna e tenendo quella con la confidenza (avg_logprob) migliore; `auto.courses[].language: en` forza la lingua per un corso. La lingua degli appunti è `notes.language` (`en`, `it`, oppure `lecture` = quella rilevata; per corso `auto.courses[].notes_language`): viene dichiarata nel prompt e usata per i titoli dei box, altrimenti il modello oscilla tra un run e l'altro.
@@ -415,7 +426,7 @@ Stato e fallimenti in `output/auto/state.json` (uno stadio che fallisce 3 volte 
 
 Se `auto.slides: true` e in `auto.slides_dir` (default `~/Documenti/WeBeep Sync`, la cartella di [WeBeep Sync](https://github.com/toto04/webeep-sync)) esiste una cartella con il nome del corso, il job individua le slide della lezione, in ordine di affidabilità:
 
-1. **dal video** (`slides_video: true`, `src/slides/video_match.py`): le registrazioni Webex sono lo schermo condiviso; un frame ogni 5 s, ritagliato alle bande nere e ridotto a miniatura 128×72, viene confrontato con le pagine di tutti i deck del corso (correlazione di intensità + gradiente; slide vere 0.85–0.95, false ≤ 0.6). Ne esce una **timeline** (`output/slides/<slug>/timeline.json`): quale deck, quale pagina, da quando a quando. ~1 min di CPU per ora di video, niente OCR né GPU. Se parte della lezione non ha slide riconoscibili (lavagna, deck non ancora caricato) il log lo dice.
+1. **dal video** (`slides_video: true`, `src/slides/video_match.py`): le registrazioni Webex sono lo schermo condiviso; un frame ogni 5 s, ritagliato alle bande nere e ridotto a miniatura 128×72, viene confrontato con le pagine di tutti i deck del corso (correlazione di intensità + gradiente **sul residuo**: a pagine e frame si sottrae la pagina media del deck, altrimenti con deck che condividono lo stesso template sfondo e layout dominano e ogni pagina somiglia a ogni frame; soglie 0.50 di score e 0.06 di margine sul secondo candidato, ignorando le pagine vicine dello stesso deck). Ne esce una **timeline** (`output/slides/<slug>/timeline.json`): quale deck, quale pagina, da quando a quando. ~1 min di CPU per ora di video, niente OCR né GPU. Se parte della lezione non ha slide riconoscibili (lavagna, deck non ancora caricato) il log lo dice.
 2. **dalla trascrizione** (`select_decks`), se il video manca o non mostra slide: per ogni pagina di ogni deck una pertinenza (termini in comune pesati per idf sul corso × quanto sono detti); il deck con media più alta entra sempre, altri (fino a `slides_max_decks`) se hanno media ≥ 35 % del migliore e abbastanza pagine forti.
 
 Con la timeline, al modello arrivano solo le pagine mostrate, con l'intervallo (`[09:25–14:20 · slide 6: …]`), le figure con "shown at mm:ss" e la trascrizione con un marcatore `[mm:ss]` al minuto: figure e definizioni finiscono dove il docente le ha mostrate. Scelta salvata (e modificabile) in `output/slides/<slug>/selection.json`; override con `"decks": ["nome.pdf", ...]` nel sidecar `.json` del video. Ogni deck è estratto una volta sola in `output/slides/_decks/<nome>__<hash>/`:
