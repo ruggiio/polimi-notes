@@ -113,6 +113,8 @@ auto:
   cleanup: true                  # dopo le note: mp4 (vedi sopra), .aux/.log LaTeX, provini triage, cache slide obsolete
   notify: true                   # notify-send per login richiesto / errori
   max_failures: 3                # dopo N fallimenti di uno stadio la lezione viene saltata
+  min_words_per_min: 30          # trascrizione sotto questa densità (normale: 110-150) → niente appunti, notifica;
+                                 # l'mp4 resta per controllare l'audio. Forzare: "force_notes": true nel sidecar .json
   slides_dir: "~/Scrivania/POLI"          # cartella di WeBeep Sync (o qualsiasi <dir>/<NOME CORSO>/**/*.pdf)
   notes_subdir: "Appunti"        # il PDF viene copiato in <slides_dir>/<NOME CORSO>/<notes_subdir>/
                                  # (output/notes resta la copia di riferimento: è quella che segna "già fatto")

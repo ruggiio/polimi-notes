@@ -8,6 +8,7 @@ Ogni stadio guarda i file su disco e fa solo ciò che manca:
   3. notes      ogni transcript senza PDF → notes_gen (backend da config) → output/notes/*.pdf
                 con contesto RAG dalle lezioni precedenti del corso (rag.enabled); dopo il PDF
                 il transcript viene indicizzato in output/rag (ChromaDB, embedding ONNX locali)
+                trascrizioni quasi vuote (< auto.min_words_per_min parole/min) saltate con notifica
   4. cleanup    per le lezioni con PDF: via l'mp4 (se keep_videos false), file di lavoro LaTeX,
                 provini del triage, cache di deck obsoleti
 
@@ -77,6 +78,7 @@ class State:
         self.d = json.loads(path.read_text()) if path.exists() else {}
         self.d.setdefault("downloaded", {})
         self.d.setdefault("failures", {})
+        self.d.setdefault("sparse", {})      # trascrizioni quasi vuote: appunti non generati
 
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,11 +119,26 @@ def lecture_meta(video: Path) -> dict:
         d = json.loads(side.read_text())
         course = re.sub(r"^\d+\s*-\s*", "", d.get("course", "")).split(" (")[0].strip() or "Unknown Course"
         return {"course": course, "date": d.get("date_iso") or str(date.today()), "topic": d.get("topic", ""),
-                "decks": d.get("decks") or []}     # override manuale dei deck di slide
+                "decks": d.get("decks") or [],      # override manuale dei deck di slide
+                "force_notes": bool(d.get("force_notes")),   # appunti anche se la trascrizione è quasi vuota
+                "duration": d.get("duration", "")}
     m = re.match(r"(\d{4}-\d{2}-\d{2})_([^_]+)_?(.*)", video.stem)
     if m:
         return {"course": m.group(2), "date": m.group(1), "topic": m.group(3)}
     return {"course": "Unknown Course", "date": str(date.today()), "topic": ""}
+
+
+def media_minutes(video: Path, meta: dict) -> float | None:
+    """Durata in minuti: ffprobe sull'mp4, altrimenti la colonna Durata dell'archivio (a volte "0 min")."""
+    if video.exists():
+        try:
+            out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                  "-of", "csv=p=0", str(video)], capture_output=True, text=True, timeout=60)
+            return float(out.stdout.strip()) / 60
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    m = re.match(r"(\d+)\s*min", meta.get("duration", ""))
+    return float(m.group(1)) if m and int(m.group(1)) > 0 else None
 
 
 # ── stadio 1: fetch ──────────────────────────────────────────────────────────
@@ -455,13 +472,30 @@ def stage_notes(cfg: dict, state: State, log: Log, videos_dir: Path, tr_dir: Pat
         if state.failures(key) >= auto.get("max_failures", 3):
             log(f"notes: salto {txt.stem} (troppi fallimenti)")
             continue
+        transcript_text = txt.read_text(encoding="utf-8")
+        # trascrizione quasi vuota (audio dell'aula non registrato, solo un video proiettato…):
+        # il modello scriverebbe appunti inventati. Le lezioni normali stanno a 110-150 parole/min.
+        min_wpm = auto.get("min_words_per_min", 30)
+        minutes = media_minutes(videos_dir / f"{txt.stem}.mp4", meta)
+        words = len(transcript_text.split())
+        if min_wpm and minutes and minutes >= 5 and words / minutes < min_wpm and not meta.get("force_notes"):
+            wpm = words / minutes
+            if not dry_run and txt.stem not in state.d["sparse"]:
+                state.d["sparse"][txt.stem] = {"words": words, "minutes": round(minutes, 1),
+                                               "at": f"{datetime.now():%Y-%m-%d %H:%M}"}
+                state.save()
+                notify("polimi-notes: trascrizione quasi vuota",
+                       f"{meta['course']} {meta['date']}: {words} parole in {minutes:.0f} min — appunti non generati",
+                       auto.get("notify", True))
+            log(f"notes: ⚠ salto {txt.stem}: {words} parole in {minutes:.0f} min ({wpm:.0f}/min < {min_wpm}) "
+                f"— audio mancante? Per forzare: \"force_notes\": true nel sidecar .json")
+            continue
         log(f"notes: → {meta['course']} {meta['date']} — {meta['topic'][:50]}")
         if dry_run:
             continue
         # modello per corso (es. opus per i corsi più matematici), altrimenti quello del backend
         course_cfg = course_config(auto, meta["course"])
         run_cfg = dict(bcfg, **({"model": course_cfg["model"]} if course_cfg.get("model") else {}))
-        transcript_text = txt.read_text(encoding="utf-8")
         deck = find_slides(cfg, log, txt.stem, meta, transcript_text, video=videos_dir / f"{txt.stem}.mp4")
         slides_text, figures, prompt_transcript = None, None, None
         if deck:
