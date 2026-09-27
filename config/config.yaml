@@ -91,7 +91,7 @@ rag:
 auto:
   courses:                       # corsi da seguire nell'Archivio registrazioni
     - name: "BIOINSPIRED ROBOTICS"   # nome usato per scheda corso e titolo delle note
-      match: "BIOINSPIRED"           # filtro campo "Corso" dell'archivio (nome o codice)
+      match: "BIOINSPIRED ROBOTICS"  # filtro campo "Corso" dell'archivio (nome o codice; "BIOINSPIRED" da solo prende anche il LAB - PROTOTYPING OF BIOINSPIRED SOLUTIONS)
       slides_links:                  # moduli url di WeBeep (o link OneDrive) con le slide: scaricati ogni notte
         - "https://webeep.polimi.it/mod/url/view.php?id=488848"
       # model: opus                  # override del modello per questo corso (default: notes.claude-code.model)
