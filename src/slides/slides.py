@@ -307,6 +307,20 @@ def _deck_key(p: Path) -> tuple[Path, str]:
     return folder, p.stem.lower()
 
 
+def _is_portrait(p: Path) -> bool:
+    """PDF a pagine verticali (paper, dispensa): non sono slide proiettate."""
+    if p.suffix.lower() != ".pdf":
+        return False
+    try:
+        import pymupdf as fitz
+        with fitz.open(p) as d:
+            step = max(1, d.page_count // 20)
+            pages = [d[i].rect for i in range(0, d.page_count, step)]
+            return bool(pages) and sum(r.width > r.height for r in pages) < 0.5 * len(pages)
+    except Exception:
+        return False
+
+
 def list_decks(course_dir: Path, notes_subdir: str = NOTES_SUBDIR) -> list[Path]:
     found = sorted(p for p in course_dir.rglob("*") if p.suffix.lower() in DECK_EXT
                    and not p.name.startswith("~$") and p.stat().st_size > 10_000
@@ -765,6 +779,12 @@ def locate_and_extract(slides_root: Path, course_name: str, topic: str, out_dir:
             if weak:
                 log(f"slides: scartati {', '.join(weak)} (video senza slide, argomento non corrispondente)")
             chosen = [(d, i) for d, i in chosen if i.get("topic", 0) >= 0.5]
+            # un paper (Projects/…/paper.pdf) batte l'argomento con una parola sola ("NNs") e la
+            # trascrizione di un'esercitazione: senza slide nel video, un PDF verticale non è il deck
+            paper = [d.name for d, _ in chosen if _is_portrait(d)]
+            if paper:
+                log(f"slides: scartati {', '.join(paper)} (video senza slide, documento verticale)")
+            chosen = [(d, i) for d, i in chosen if not _is_portrait(d)]
     if not chosen and notebooks:
         picked = select_decks(notebooks, topic, transcript, max_decks=2)
         if transcript and not blank:
