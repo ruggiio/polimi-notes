@@ -51,9 +51,10 @@ notes:
     max_tokens: 64000
 
   claude-code:
-    model: "sonnet"      # alias CLI: sonnet / opus / fable, o un model id completo
+    model: "claude-sonnet-5-5"   # id fisso (l'alias "sonnet" cambia da solo a ogni rilascio); sonnet / opus / fable
     timeout: 1800        # secondi per chiamata
-    # effort: medium     # low/medium/high: controlla il thinking (default del CLI se omesso)
+    effort: high         # low/medium/high: controlla il thinking. Sonnet 5.5 con l'effort di default non
+                         # ragiona e scrive appunti lunghi la metà (MOR Lecture 1: 3.7k parole contro 5.4-6.6k)
 
   ollama:
     model: "mistral"
@@ -76,13 +77,18 @@ figures:
   max_candidates: 30       # Max frames to analyze with Vision API (cost control)
   complexity_threshold: 0.05  # Min visual complexity score to be a candidate
 
+board:                    # lettura della lavagna (lezioni riprese in aula: telecamera sulla lavagna)
+  enabled: true           # tratti alla lavagna riconosciuti dal colore; senza lavagna nel video non costa nulla
+  models: ["sonnet", "opus", "opus"]   # lettore A, lettore B (indipendenti), arbitro sulle discordanze
+  workers: 3              # keyframe letti in parallelo
+
 gemini:
   model: "gemini-2.0-flash-lite"  # Used for PDF figure extraction in ingest-pdf
   api_key: ""                      # Or set GEMINI_API_KEY env var
 
 rag:
   enabled: true             # true = enable RAG for cross-lecture context
-  db_path: "output/rag"    # ChromaDB persistent storage path
+  db_path: "output/rag_eg2"  # ChromaDB (EmbeddingGemma 2; output/rag = vecchio MiniLM, backup)
   n_results: 5             # Number of passages to retrieve
   chunk_size: 500          # Words per chunk when indexing
   chunk_overlap: 50        # Word overlap between chunks
@@ -106,7 +112,10 @@ auto:
       match: "MACHINE LEARNING FOR MECHANICAL"
       # slides_links:                # se il docente pubblica le slide come link OneDrive: incolla qui il link WeBeep
       #   - "https://webeep.polimi.it/mod/url/view.php?id=XXXXXX"
-  kind: null                     # forma didattica: null = tutte, oppure LE lezione / LA lab / ES esercitazione / OT
+    - name: "SMART MATERIALS"          # 25/26: NON è nell'archivio (Personal Room del prof): le registrazioni
+      match: "SMART MATERIALS"         # si scaricano dai link del .docx su WeBeep con tools/fetch_webex_links.py
+      aa: 2025
+  kind: null                    # forma didattica: null = tutte, oppure LE lezione / LA lab / ES esercitazione / OT
   state_file: "output/auto/state.json"
   log_file: "output/auto/nightly.log"
   keep_videos: false             # false = cancella l'mp4 quando il PDF degli appunti esiste (prima resta, per poter ritrascrivere)

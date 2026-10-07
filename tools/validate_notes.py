@@ -31,9 +31,10 @@ BOXES = ("definizione", "teorema", "esempio", "intuizione", "attenzione", "sinte
 
 def strip_latex(tex: str) -> str:
     body = tex[tex.find("\\begin{document}"):] if "\\begin{document}" in tex else tex
-    body = re.sub(r"%.*", "", body)
+    body = re.sub(r"(?<!\\)%.*", "", body)      # commenti, non \% (percentuale)
     # formule e figure diventano un segnaposto inline: "è definito come EQN dove u è…" resta una frase
     body = re.sub(r"\\begin\{(equation|align|figure|tabular|center)\*?\}.*?\\end\{\1\*?\}", " EQN ", body, flags=re.S)
+    body = body.replace("\\$", " ")                  # dollaro letterale (prezzi), non una formula
     body = re.sub(r"\$[^$]*\$", " X ", body)
     body = re.sub(r"\\\[.*?\\\]", " EQN ", body, flags=re.S)
     body = re.sub(r"\\(?:begin|end)\{[^}]*\}", "\n\n", body)

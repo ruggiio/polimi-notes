@@ -146,9 +146,26 @@ class LectureSlides:
     def _items(self) -> list[tuple[SlideDeck, SlidePage]]:
         return [(d, p) for d in self.decks for p in d.pages]
 
+    def _eg2_relevance(self, transcript: str) -> dict[tuple[str, int], float] | None:
+        """{(deck, pagina): voti EG2} oppure None (EG2 assente o deck senza pagine renderizzabili).
+        Le pagine sono quelle del PDF, numerate da 1 come SlidePage.page."""
+        decks = [d.pdf for d in self.decks if not is_notebook(d.pdf)]
+        votes = eg2_page_votes(decks, transcript)
+        if votes is None:
+            return None
+        from src.slides import eg2
+        out, i = {}, 0
+        for d in decks:
+            n = len(eg2.page_embeddings(Path(d)))
+            for k in range(n):
+                out[(d, k + 1)] = votes[i + k]
+            i += n
+        return out
+
     def prompt_text(self, max_chars: int = 40_000, transcript: str | None = None) -> str:
         """Testo delle slide per il prompt. Con la trascrizione, solo le pagine pertinenti
-        (≥ 30% della pagina più pertinente), le più pertinenti prima nel riempire il budget di
+        (votate da EG2 almeno una volta; senza EG2 ≥ 30% della pagina più pertinente per termini
+        in comune), le più pertinenti prima nel riempire il budget di
         caratteri, poi in ordine di deck e di slide (un deck copre più lezioni, una lezione può
         usarne più d'uno: il resto non deve contaminare gli appunti)."""
         items = [(d, p) for d, p in self._items() if p.text.strip()]
@@ -176,12 +193,17 @@ class LectureSlides:
         notebooks = [(d, p) for d, p in items if is_notebook(d.pdf)]
         items = [(d, p) for d, p in items if not is_notebook(d.pdf)]
         if transcript and items:
-            rel = _page_relevance([_tokens(p.title + " " + p.text, 5) for _, p in items], transcript)
-            top = max(rel, default=0.0)
+            ev = self._eg2_relevance(transcript)
+            if ev is not None:      # voti EG2: tenuta ogni pagina votata almeno una volta
+                rel = [ev.get((d.pdf, p.page), 0.0) for d, p in items]
+                floor = 0.0
+            else:
+                rel = _page_relevance([_tokens(p.title + " " + p.text, 5) for _, p in items], transcript)
+                floor = 0.3 * max(rel, default=0.0)
             ranked = sorted(range(len(items)), key=lambda i: -rel[i])
             keep, used = set(), 0
             for i in ranked:
-                if rel[i] < 0.3 * top or rel[i] <= 0:
+                if rel[i] < floor or rel[i] <= 0:
                     break
                 n = len(items[i][1].text) + 40
                 if used + n > max_chars:
@@ -205,7 +227,8 @@ class LectureSlides:
         """
         Figure da offrire al modello, in ordine di deck e di slide. Con la trascrizione: punteggio
         di pertinenza (2 × termini della didascalia + termini della slide in comune con il parlato,
-        ≥5 lettere, pesati per specificità nell'insieme dei deck e per frequenza nel parlato);
+        ≥5 lettere, pesati per specificità nell'insieme dei deck e per frequenza nel parlato;
+        non EG2: sul banco VB3DM 07/10/2026 figure da slide mostrate 57/59 lessicale, 55/59 EG2);
         tenute quelle con punteggio ≥ min_score, al massimo max_figures (le più pertinenti).
         Mai vuota se esiste almeno una figura: senza candidate sopra soglia si tengono le migliori
         con punteggio > 0, e in mancanza le prime del deck principale (self.fallback dice quale).
@@ -307,6 +330,27 @@ def _deck_key(p: Path) -> tuple[Path, str]:
     return folder, p.stem.lower()
 
 
+BOOK_MIN_PAGES = 100
+
+
+def _is_book(p: Path) -> bool:
+    """Libro o dispensa lunga (pagine verticali, > BOOK_MIN_PAGES): materiale del corso, non slide
+    proiettate. Come deck costerebbe estrazione e triage di centinaia di pagine e vincerebbe il
+    match per sola quantità di testo."""
+    if p.suffix.lower() != ".pdf":
+        return False
+    try:
+        import pymupdf as fitz
+        with fitz.open(p) as d:
+            if d.page_count <= BOOK_MIN_PAGES:
+                return False
+            step = max(1, d.page_count // 20)
+            pages = [d[i].rect for i in range(0, d.page_count, step)]
+            return sum(r.width > r.height for r in pages) < 0.5 * len(pages)
+    except Exception:
+        return False
+
+
 def _is_portrait(p: Path) -> bool:
     """PDF a pagine verticali (paper, dispensa): non sono slide proiettate."""
     if p.suffix.lower() != ".pdf":
@@ -325,7 +369,8 @@ def list_decks(course_dir: Path, notes_subdir: str = NOTES_SUBDIR) -> list[Path]
     found = sorted(p for p in course_dir.rglob("*") if p.suffix.lower() in DECK_EXT
                    and not p.name.startswith("~$") and p.stat().st_size > 10_000
                    # i nostri PDF di appunti sono sotto la cartella del corso: non sono slide
-                   and not (notes_subdir and notes_subdir in p.relative_to(course_dir).parts))
+                   and not (notes_subdir and notes_subdir in p.relative_to(course_dir).parts)
+                   and not _is_book(p))
     # sorgente + conversione insieme renderebbero il match "ambiguo" (stesso punteggio):
     # si tiene il PDF se aggiornato (niente riconversione), altrimenti il sorgente
     by_key: dict[tuple[Path, str], Path] = {}
@@ -487,8 +532,71 @@ def _page_relevance(page_tokens: list[set[str]], transcript: str) -> list[float]
     return [sum(math.log(n / df[t]) * min(tf[t], 3) / 3 for t in pt & tr) for pt in page_tokens]
 
 
+EG2_VOTES = (1.0, 0.5, 0.25)    # peso delle 3 pagine più vicine a ogni minuto di parlato
+_eg2_cache: dict = {}
+
+
+def eg2_page_votes(decks: list[str], transcript: str, log=print) -> list[float] | None:
+    """
+    Pertinenza di ogni pagina dei deck (in ordine di deck e di pagina) stimata con EmbeddingGemma 2:
+    la trascrizione è divisa in finestre di ~1 minuto e ogni finestra vota le 3 pagine (come
+    immagine) più vicine, con pesi EG2_VOTES. Il punteggio è quindi "minuti in cui la pagina
+    era la più vicina al parlato". Banco VB3DM 07/10/2026: pagina giusta al 1° posto 45% contro
+    31% del lessicale (_page_relevance), ±2 pagine 65% contro 48%; in prompt_text pagine mostrate
+    coperte 83% contro 63%, precisione 92% contro 86%. None se EG2 non è installato
+    o fallisce: allora si usa _page_relevance.
+    """
+    from src.slides import eg2
+    key = (tuple(decks), hash(transcript))
+    if key in _eg2_cache:
+        return _eg2_cache[key]
+    if not eg2.available():
+        return None
+    try:
+        import numpy as np
+        P = [eg2.page_embeddings(Path(d)) for d in decks]
+        sizes = [len(x) for x in P]
+        if not sum(sizes):
+            return None
+        Q = eg2.encode_texts(eg2.transcript_windows(transcript), prompt_name="SearchQuery")
+    except Exception as e:
+        log(f"slides: EG2 non disponibile ({type(e).__name__}: {str(e)[:80]}), pertinenza lessicale")
+        return None
+    votes = np.zeros(sum(sizes), np.float32)
+    if len(Q):
+        S = Q @ np.concatenate(P).T
+        for r, w in enumerate(EG2_VOTES[:S.shape[1]]):
+            np.add.at(votes, np.argsort(-S, 1)[:, r], w)
+    out = [float(v) for v in votes]
+    _eg2_cache[key] = out
+    return out
+
+
+LECTURE_NO = re.compile(r"(?:lecture|lezione|lesson|lect|lez|lec)[\s_.\-]*0*(\d{1,2})(?!\d)", re.I)
+
+
+def lecture_number(s: str) -> int | None:
+    """Numero di lezione in un titolo o nome file: "Lecture 1. Intro…" → 1, "MOR_MEC_Lecture1_26" → 1."""
+    m = LECTURE_NO.search(s)
+    return int(m.group(1)) if m else None
+
+
 def select_decks(decks: list[Path], topic: str, transcript: str | None = None,
                  max_decks: int = 3) -> list[tuple[Path, dict]]:
+    chosen = _select_decks(decks, topic, transcript, max_decks)
+    # il numero di lezione è l'indizio più forte che c'è ("Lecture 1" ↔ MOR_MEC_Lecture1_26.pdf):
+    # quel deck entra sempre, per primo. Senza, l'argomento "Model Order Reduction" dava 1.0 a ogni
+    # deck del corso e la trascrizione di una lezione introduttiva sceglieva gli Assignments
+    n = lecture_number(topic)
+    same = [d for d in decks if n is not None and lecture_number(d.stem) == n]
+    if same:
+        rest = [(d, i) for d, i in chosen if d not in same]
+        chosen = [(d, {"lecture_no": n, "topic": 1.0}) for d in same] + rest
+    return chosen[:max_decks]
+
+
+def _select_decks(decks: list[Path], topic: str, transcript: str | None = None,
+                  max_decks: int = 3) -> list[tuple[Path, dict]]:
     """
     Deck usati nella lezione, in ordine di evidenza, [(deck, info)]. Vuoto solo senza alcun indizio.
 

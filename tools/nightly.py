@@ -297,6 +297,41 @@ def find_slides(cfg: dict, log: Log, stem: str, meta: dict, transcript: str | No
         return None
 
 
+def read_lecture_board(cfg: dict, log: Log, stem: str, video: Path):
+    """BoardReading dei tratti alla lavagna del video (cache in output/board/<slug>/), oppure None."""
+    bcfg = cfg.get("board", {})
+    if not bcfg.get("enabled", False) or not video.exists():
+        return None
+    from src.board.board import read_board
+    from src.notes_gen.notes_gen import ClaudeRateLimited
+    try:
+        return read_board(video, (Path("output/board") / _slugify(stem)).resolve(),
+                          models=tuple(bcfg.get("models", ["sonnet", "opus", "opus"])),
+                          workers=bcfg.get("workers", 3), log=log)
+    except ClaudeRateLimited:
+        raise                      # quota finita: la lezione si rifà al giro dopo, con la lavagna
+    except Exception as e:
+        log(f"board: errore {type(e).__name__}: {str(e)[:150]}")
+        return None
+
+
+def board_check(board, tex: Path, log: Log):
+    """Controllo a valle: ogni formula VERIFICATA della lavagna deve essere arrivata intatta negli appunti."""
+    from src.board.board import check_notes
+    try:
+        report = check_notes(tex.read_text(encoding="utf-8"), board)
+    except Exception as e:
+        log(f"board: controllo appunti non riuscito: {type(e).__name__}: {str(e)[:120]}")
+        return
+    bad = [r for r in report if r["ratio"] < 0.85]
+    marks = tex.read_text(encoding="utf-8").count("\\boardcheck{")
+    log(f"board: appunti: {len(report) - len(bad)}/{len(report)} formule verificate riportate intatte, "
+        f"{marks} segnalate da ricontrollare (\\boardcheck)")
+    for r in bad:
+        log(f"board: ⚠ formula della lavagna assente o cambiata negli appunti ({r['ratio']:.2f}): {r['board'][:100]}")
+    Path(board.shots[0].image).with_name("check.json").write_text(json.dumps(report, ensure_ascii=False, indent=1))
+
+
 # ── stadio 2: transcribe ─────────────────────────────────────────────────────
 
 def stage_transcribe(cfg: dict, state: State, log: Log, videos_dir: Path, tr_dir: Path,
@@ -366,10 +401,11 @@ def rag_queries(text: str, topic: str, words: int = 150) -> list[str]:
 
 
 def rag_index(rag, log: Log, txt: Path, meta: dict) -> bool:
-    """Indicizza il transcript se non lo è già (id = corso+data+chunk: upsert idempotente)."""
-    if rag.is_indexed(meta["course"], meta["date"]):
+    """Indicizza il transcript se non lo è già. Chiave = nome del file, non la data: due lezioni
+    dello stesso giorno (es. Smart Materials 02/03) sono due documenti."""
+    if rag.is_indexed(meta["course"], meta["date"], doc=txt.stem):
         return False
-    n = rag.add_lecture(txt.read_text(encoding="utf-8"), meta["course"], meta["date"])
+    n = rag.add_lecture(txt.read_text(encoding="utf-8"), meta["course"], meta["date"], doc=txt.stem)
     log(f"rag: indicizzata {txt.stem} ({n} chunk)")
     return True
 
@@ -509,14 +545,20 @@ def stage_notes(cfg: dict, state: State, log: Log, videos_dir: Path, tr_dir: Pat
             if deck.timeline:
                 # slide e figure hanno i tempi: la trascrizione va nel prompt con un marcatore al minuto
                 prompt_transcript = timed_transcript(txt) or None
+        board_text = None
+        board = read_lecture_board(cfg, log, txt.stem, videos_dir / f"{txt.stem}.mp4")
+        if board:
+            board_text = board.prompt_text()
+            figures = (figures or []) + board.figures(latex_dir.resolve())
+            prompt_transcript = prompt_transcript or timed_transcript(txt) or None
         rag_context = None
         if rag and rag.course_exists(meta["course"]):
             try:
                 rag_context = rag.query_context(rag_queries(transcript_text, meta["topic"]), meta["course"],
                                                 n_results=cfg.get("rag", {}).get("n_results", 5),
-                                                exclude_date=meta["date"]) or None
+                                                exclude_doc=txt.stem) or None
                 if rag_context:
-                    log(f"rag: {rag_context.count('[Lecture ')} passaggi dalle lezioni precedenti "
+                    log(f"rag: {rag_context.count(chr(10) + '---' + chr(10)) + 1} passaggi dalle lezioni precedenti "
                         f"({len(rag_context)} chars)")
             except Exception as e:
                 log(f"rag: ✗ query: {type(e).__name__}: {str(e)[:120]}")
@@ -529,13 +571,15 @@ def stage_notes(cfg: dict, state: State, log: Log, videos_dir: Path, tr_dir: Pat
                 compile_pdf_flag=ncfg["latex"].get("compile_pdf", True),
                 transcript_path=txt, pdf_output_dir=pdf_dir, suffix=meta["topic"] or None,
                 figures=figures, slides_text=slides_text, rag_context=rag_context,
-                transcript_text=prompt_transcript,
+                transcript_text=prompt_transcript, board_text=board_text,
                 language=notes_language(ncfg, course_cfg, txt),
             )
             pdf = _pdf_for(meta, pdf_dir)
             if pdf.exists():
                 n += 1
                 state.clear_fail(key)
+                if board:
+                    board_check(board, latex_dir / "lecture_notes.tex", log)
                 if rag:
                     try:
                         rag_index(rag, log, txt, meta)

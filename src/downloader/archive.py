@@ -20,6 +20,7 @@ Flusso verificato (2026-09-15):
 from __future__ import annotations
 
 import re
+from urllib.parse import urljoin
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -256,9 +257,11 @@ def search_archive(page: Page, aa: int | None = None, course: str | None = None,
     page.wait_for_load_state("networkidle", timeout=30_000)
     page.wait_for_timeout(500)
 
-    tutte = page.locator('a:text-is("tutte")')
+    # risultati a pagine da 10: "tutte" (action=plen_0) li mostra in una pagina sola. Il testo del
+    # link ha spazi attorno (a:text-is("tutte") non lo trovava: restavano i primi 10): si cerca l'href
+    tutte = page.locator('a[href*="action=plen_0"]')
     if tutte.count():
-        tutte.first.click()
+        page.goto(urljoin(page.url, tutte.first.get_attribute("href")))
         page.wait_for_load_state("networkidle", timeout=30_000)
         page.wait_for_timeout(500)
 
@@ -300,10 +303,21 @@ def open_recording(ctx: BrowserContext, page: Page, rec: Recording, email: str,
     Clicca "Riproduci" (nuova scheda), supera il login Webex con la sola email, avvia il
     player e intercetta la risposta video/mp4. Solleva LoginRequired se compare password/2FA.
     """
-    found: dict = {}
     with ctx.expect_page(timeout=15_000) as npi:
         page.locator(f'a[href*="transfer_id={rec.transfer_id}"]').first.click()
-    p = npi.value
+    return _capture_media(ctx, npi.value, email, timeout_s)
+
+
+def open_recording_url(ctx: BrowserContext, url: str, email: str, timeout_s: int = 120) -> MediaInfo:
+    """Come open_recording, ma da un link Webex diretto (…/ldr.php?RCID=…, es. le Personal Room
+    che il docente elenca su WeBeep e che non passano dall'archivio)."""
+    p = ctx.new_page()
+    p.goto(url, wait_until="domcontentloaded")
+    return _capture_media(ctx, p, email, timeout_s)
+
+
+def _capture_media(ctx: BrowserContext, p: Page, email: str, timeout_s: int) -> MediaInfo:
+    found: dict = {}
 
     def on_response(r):
         if "/nbr/" not in r.url:

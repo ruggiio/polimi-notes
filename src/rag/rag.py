@@ -1,8 +1,11 @@
 """
 rag.py — Course-level RAG (Retrieval-Augmented Generation) for lecture context
 
-Uses ChromaDB for vector storage. Embeddings: sentence-transformers (all-MiniLM-L6-v2) if
-installed, otherwise ChromaDB's bundled ONNX version of the same model (no torch needed).
+Uses ChromaDB for vector storage. Embeddings: EmbeddingGemma 2 (src/slides/eg2.py: multilingual,
+8K context, task prefixes "Document" / "SearchQuery") when torch + sentence-transformers are
+installed, otherwise ChromaDB's bundled ONNX all-MiniLM-L6-v2 (English only, no torch needed).
+Each collection records its embedder in the metadata: vectors of different models never mix
+(tools/rag_migrate_eg2.py re-embeds an old MiniLM database).
 Allows querying previous lectures to provide context for notes generation.
 """
 
@@ -11,6 +14,15 @@ from pathlib import Path
 from rich.console import Console
 
 console = Console()
+
+# Header of each retrieved passage in the prompt. Unknown sources: "[Lecture <date>, <source>]"
+SOURCE_LABELS = {
+    "transcript": "[Lecture {date}, transcript]",
+    "pdf": "[Lecture {date}, our notes: {doc}]",
+    "handout": "[Official course material (handout): {doc}]",
+    "third-party": ("[Notes written by ANOTHER STUDENT: {doc} — not authoritative, may contain "
+                    "errors; the lecture transcript and the slides take precedence]"),
+}
 
 
 class CourseRAG:
@@ -33,14 +45,16 @@ class CourseRAG:
         self.chunk_overlap = chunk_overlap
 
         self.client = chromadb.PersistentClient(path=str(self.db_path))
-        try:
-            from sentence_transformers import SentenceTransformer
-            model = SentenceTransformer("all-MiniLM-L6-v2")
-            self._embed = lambda texts: model.encode(texts).tolist()
-        except ImportError:
+        from src.slides import eg2
+        if eg2.available():
+            self.embedder = "embeddinggemma-2"
+            self._embed_docs = lambda texts: eg2.encode_texts(texts, prompt_name="Document").tolist()
+            self._embed_query = lambda texts: eg2.encode_texts(texts, prompt_name="SearchQuery").tolist()
+        else:
             from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
             ef = DefaultEmbeddingFunction()          # all-MiniLM-L6-v2 via onnxruntime, CPU
-            self._embed = lambda texts: [list(map(float, v)) for v in ef(texts)]
+            self.embedder = "all-MiniLM-L6-v2"
+            self._embed_docs = self._embed_query = lambda texts: [list(map(float, v)) for v in ef(texts)]
 
     def _get_collection(self, course_name: str):
         """Get or create a ChromaDB collection for a course."""
@@ -50,7 +64,13 @@ class CourseRAG:
         safe_name = safe_name[:63] if len(safe_name) > 63 else safe_name
         if len(safe_name) < 3:
             safe_name = safe_name + "_course"
-        return self.client.get_or_create_collection(name=safe_name)
+        col = self.client.get_or_create_collection(name=safe_name, metadata={"embedder": self.embedder})
+        have = (col.metadata or {}).get("embedder", "all-MiniLM-L6-v2")
+        if have != self.embedder:
+            raise RuntimeError(f"RAG: collection '{safe_name}' in {self.db_path} was built with {have}, "
+                               f"this run embeds with {self.embedder} (install torch + sentence-transformers, "
+                               f"or migrate with tools/rag_migrate_eg2.py)")
+        return col
 
     def _chunk_text(self, text: str) -> list[str]:
         """Split text into overlapping chunks by word count."""
@@ -73,24 +93,30 @@ class CourseRAG:
         course_name: str,
         lecture_date: str,
         source: str = "transcript",
+        doc: str | None = None,
     ) -> int:
         """
         Index a lecture transcript into the RAG database.
         Returns the number of chunks added.
+        doc: a document key (e.g. the PDF file name) for material that is not one-per-date:
+        ids come from it instead of the date, and its previous chunks are replaced.
         """
         collection = self._get_collection(course_name)
         chunks = self._chunk_text(transcript)
+        if doc:
+            collection.delete(where={"doc": doc})
 
         if not chunks:
             console.print("[dim]RAG: no chunks to index[/dim]")
             return 0
 
         # Generate embeddings
-        embeddings = self._embed(chunks)
+        embeddings = self._embed_docs(chunks)
 
         # Create unique IDs based on course, date, and chunk index
+        key = f"doc:{doc}" if doc else lecture_date
         ids = [
-            f"{course_name}_{lecture_date}_{source}_{i}"
+            f"{course_name}_{key}_{source}_{i}"
             for i in range(len(chunks))
         ]
 
@@ -101,6 +127,7 @@ class CourseRAG:
                 "lecture_date": lecture_date,
                 "source": source,
                 "chunk_index": i,
+                **({"doc": doc} if doc else {}),
             }
             for i in range(len(chunks))
         ]
@@ -125,12 +152,15 @@ class CourseRAG:
         course_name: str,
         n_results: int = 5,
         exclude_date: str | None = None,
+        exclude_doc: str | None = None,
     ) -> str:
         """
         Query the RAG database for relevant context from previous lectures.
         query_text may be a list (e.g. samples from the start, middle and end of the lecture):
         results are merged by distance, one entry per chunk. exclude_date leaves out the
-        lecture being generated (already indexed when notes are regenerated).
+        lecture being generated (already indexed when notes are regenerated); exclude_doc does it
+        by document, so other lectures of the same day and other people's notes of this very
+        lecture stay in.
         Returns a formatted string of relevant passages with their lecture date.
         """
         collection = self._get_collection(course_name)
@@ -141,9 +171,10 @@ class CourseRAG:
         queries = [query_text] if isinstance(query_text, str) else [q for q in query_text if q.strip()]
         if not queries:
             return ""
-        kwargs = {"where": {"lecture_date": {"$ne": exclude_date}}} if exclude_date else {}
+        kwargs = ({"where": {"doc": {"$ne": exclude_doc}}} if exclude_doc else
+                  {"where": {"lecture_date": {"$ne": exclude_date}}} if exclude_date else {})
         results = collection.query(
-            query_embeddings=self._embed(queries),
+            query_embeddings=self._embed_query(queries),
             n_results=min(n_results, collection.count()),
             **kwargs,
         )
@@ -163,61 +194,57 @@ class CourseRAG:
         for _, doc, metadata in top:
             date = metadata.get("lecture_date", "unknown")
             source = metadata.get("source", "transcript")
-            passages.append(f"[Lecture {date}, {source}]\n{doc}")
+            passages.append(f"{SOURCE_LABELS.get(source, '[Lecture {date}, {source}]').format(date=date, doc=metadata.get('doc', ''))}\n{doc}")
 
         context = "\n\n---\n\n".join(passages)
         console.print(f"[dim]RAG: retrieved {len(passages)} passages from previous lectures[/dim]")
         return context
 
-    def is_indexed(self, course_name: str, lecture_date: str, source: str = "transcript") -> bool:
-        """True if at least one chunk of that lecture is in the index."""
+    def is_indexed(self, course_name: str, lecture_date: str, source: str = "transcript",
+                   doc: str | None = None) -> bool:
+        """True if at least one chunk of that lecture (of that document, with doc) is in the index."""
         try:
-            got = self._get_collection(course_name).get(
-                where={"$and": [{"lecture_date": lecture_date}, {"source": source}]}, limit=1)
+            where = ({"doc": doc} if doc else
+                     {"$and": [{"lecture_date": lecture_date}, {"source": source}]})
+            got = self._get_collection(course_name).get(where=where, limit=1)
             return bool(got["ids"])
         except Exception:
             return False
 
-    def add_from_pdf(self, pdf_path: Path, course_name: str) -> int:
+    def add_from_pdf(self, pdf_path: Path, course_name: str, source: str = "pdf") -> int:
         """
         Extract text from a PDF and add it to the RAG database.
+        source: "pdf" (our own notes), "handout" (official material), "third-party" (other students'
+        notes): it decides how the passages are labelled in the prompt. The file name is the
+        document key, so re-indexing a file replaces it and two PDFs never overwrite each other.
         Returns the number of chunks added.
         """
+        import re
+        import pymupdf
         try:
-            import pdfplumber
-        except ImportError:
-            console.print("[yellow]⚠ pdfplumber not installed — cannot index PDFs[/yellow]")
-            return 0
-
-        text_parts = []
-        try:
-            with pdfplumber.open(pdf_path) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text_parts.append(page_text)
+            with pymupdf.open(pdf_path) as pdf:
+                text_parts = [t for page in pdf if (t := page.get_text().strip())]
         except Exception as e:
             console.print(f"[yellow]⚠ Failed to read PDF {pdf_path}: {e}[/yellow]")
             return 0
 
         if not text_parts:
-            console.print(f"[dim]RAG: no text extracted from {pdf_path.name}[/dim]")
+            console.print(f"[yellow]⚠ RAG: no text in {pdf_path.name} (scanned? OCR is not supported)[/yellow]")
             return 0
 
-        full_text = "\n\n".join(text_parts)
-
-        # Extract date from filename (expected format: DD-MM-YYYY_CourseName.pdf)
-        lecture_date = "unknown"
-        name = pdf_path.stem
-        parts = name.split("_", 1)
-        if parts and len(parts[0]) == 10:
-            lecture_date = parts[0]
+        # date from the file name (DD-MM-YYYY… or YYYY-MM-DD…), as ISO like the transcripts
+        lecture_date = ""
+        if m := re.match(r"(\d{2})-(\d{2})-(\d{4})", pdf_path.name):
+            lecture_date = f"{m[3]}-{m[2]}-{m[1]}"
+        elif m := re.match(r"\d{4}-\d{2}-\d{2}", pdf_path.name):
+            lecture_date = m[0]
 
         return self.add_lecture(
-            transcript=full_text,
+            transcript="\n\n".join(text_parts),
             course_name=course_name,
             lecture_date=lecture_date,
-            source="pdf",
+            source=source,
+            doc=pdf_path.stem,
         )
 
     def course_exists(self, course_name: str) -> bool:

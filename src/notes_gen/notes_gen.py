@@ -80,9 +80,11 @@ LANG_NAMES = {"it": "Italian", "en": "English", "fr": "French", "de": "German", 
 # Titoli dei box nella lingua della lezione (rilevata da Whisper); default italiano.
 BOX_TITLES = {
     "it": {"definizione": "Definizione", "teorema": "Teorema", "esempio": "Esempio", "intuizione": "Intuizione",
-           "attenzione": "Attenzione", "sintesi": "In sintesi", "lemma": "Lemma", "corollario": "Corollario"},
+           "attenzione": "Attenzione", "sintesi": "In sintesi", "lemma": "Lemma", "corollario": "Corollario",
+           "board": "lavagna"},
     "en": {"definizione": "Definition", "teorema": "Theorem", "esempio": "Example", "intuizione": "Intuition",
-           "attenzione": "Warning", "sintesi": "In summary", "lemma": "Lemma", "corollario": "Corollary"},
+           "attenzione": "Warning", "sintesi": "In summary", "lemma": "Lemma", "corollario": "Corollary",
+           "board": "board"},
 }
 
 # lmodern: font vettoriali. Senza, con [T1]{fontenc} e senza cm-super, pdflatex ripiega sui bitmap
@@ -131,6 +133,7 @@ PREAMBLE_TEMPLATE = r"""\documentclass[11pt,a4paper]{article}
 \fancyhead[R]{\small\itshape %(date)s}
 \fancyfoot[C]{\small--- \thepage\ ---}
 \renewcommand{\headrulewidth}{0.4pt}
+\newcommand{\boardcheck}[1]{\text{\textcolor{notered}{\footnotesize\,[\,%(board)s #1\,?\,]}}}
 \setlength{\headheight}{14pt}
 \title{%(course)s}
 \author{}
@@ -271,6 +274,7 @@ def _build_prompt(
     course_profile: str = None,
     slides_text: str = None,
     language: str = None,
+    board_text: str = None,
 ) -> str:
     lang_line = f"Language of the notes: {LANG_NAMES.get(language[:2].lower(), language)}\n" if language else ""
     prompt = f"""Convert the following lecture transcript into complete, comprehensive LaTeX notes.
@@ -307,6 +311,23 @@ Sections marked "notebook" are the Jupyter notebook of a hands-on session: use t
 function and API names, and include short code excerpts only where the lecture actually worked through them.)
 {slides_text}
 """
+    if board_text:
+        prompt += f"""
+--- BLACKBOARD (what the professor wrote, read from the video with a verification step) ---
+(Each block is one state of the blackboard just before it was erased: "[board k · written by mm:ss]"
+matches the [mm:ss] markers of the transcript. Text lines are the professor's own written words and
+annotations: follow them for structure, terminology and notation. Formulas carry a tag:
+VERIFIED — two independent readings of the board agree (or a third check confirmed one): this IS what
+  was written. Reproduce it with exactly the same symbols, indices, accents, arrows, transposes and
+  notation; you may only change LaTeX spelling and add the explanation around it. Never "correct" a
+  VERIFIED formula: if it seems to conflict with the transcript, keep the board version and explain.
+UNCERTAIN — the readings disagree; the version given is only the best guess. Write the formula you can
+  best support from the transcript and the guess, and put \\boardcheck{{mm:ss}} (the block's time) right
+  after it, outside math mode, so the reader knows to check the board picture.
+UNREADABLE — do not reproduce it; rely on the transcript and add \\boardcheck{{mm:ss}}.
+The blackboard is the authority for HOW formulas are written; the transcript for WHAT is explained.)
+{board_text}
+"""
     if figures:
         prompt += """
 --- FIGURES TO INCLUDE ---
@@ -332,6 +353,11 @@ Insert each figure near the section where the corresponding topic is discussed (
                 mins = int(fig["timestamp"] // 60)
                 secs = int(fig["timestamp"] % 60)
                 where = f"[{mins:02d}:{secs:02d}]"
+            if fig.get("board"):
+                where = f"[board {fig['board']} · written by {int(fig['timestamp'] // 60):02d}:{int(fig['timestamp'] % 60):02d}]"
+                if fig.get("uncertain"):
+                    where += (" (has UNCERTAIN formulas: include it right after the formulas you marked "
+                              "\\boardcheck from this board, so the reader can check them on the picture)")
             prompt += f"{where} latex_path={fig['latex_path']} caption={fig['caption']}\n"
         prompt += ("\nCRITICAL: Use ONLY the exact latex_path values listed above. Never invent or modify figure filenames. "
                    f"These are CANDIDATES, not a list to include: use at most {max(1, len(figures) // 2)} of them, and a figure only "
@@ -344,7 +370,9 @@ Insert each figure near the section where the corresponding topic is discussed (
         prompt += f"""
 --- CONTEXT FROM COURSE MATERIAL (handouts and previous lectures) ---
 (Use this to maintain consistency with terminology, notation, and concepts.
-Reference prior material where appropriate.
+Reference prior material where appropriate. Each passage says where it comes from: passages
+from ANOTHER STUDENT's notes may contain errors — use them only to cross-check and to recall
+context, never to override or add facts against the transcript and the slides.
 
 IMPORTANT — FIGURES: If the context contains a marker like [FIGURE: output/rag/figures/X.png],
 a figure image exists at that path. Include it in the LaTeX notes near the relevant topic:
@@ -1337,6 +1365,7 @@ def generate_notes(
     rag_context: str = None,
     slides_text: str = None,
     language: str = None,
+    board_text: str = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     cfg = backend_config or {}
@@ -1436,7 +1465,7 @@ def generate_notes(
         console.print(f"  Chunk 1/1...")
         prompt = _build_prompt(
             full_transcript, filtered_ocr, course_name, lecture_date,
-            figures, rag_context, course_profile, slides_text, language,
+            figures, rag_context, course_profile, slides_text, language, board_text,
         )
         raw = _call_backend(
             prompt, backend, cfg,
@@ -1465,6 +1494,7 @@ def generate_notes(
                 course_profile,
                 slides_text if i == 0 else None,
                 language,
+                board_text if i == 0 else None,
             )
             raw = _call_backend(
                 prompt, backend, cfg,
@@ -1495,23 +1525,24 @@ def generate_notes(
     tex_path.write_text(final_latex, encoding="utf-8")
     console.print(f"[green]✓ LaTeX saved:[/green] {tex_path}")
 
+    if compile_pdf_flag:
+        compile_pdf(
+            tex_path, pdf_output_dir, course_name, lecture_date, suffix,
+            auto_fix=auto_fix, backend=backend, backend_config=cfg,
+        )
+
     # Archive a per-lecture copy so course_builder can later assemble the
-    # whole course into a single cohesive PDF.
+    # whole course into a single cohesive PDF. After compile_pdf: its LaTeX and
+    # layout fixes are written to tex_path, and the archive must carry them.
     try:
         from src.course_profiles import _slugify
         course_dir = Path("output/course") / _slugify(course_name)
         course_dir.mkdir(parents=True, exist_ok=True)
         archive_name = f"{stem}.tex" if stem.startswith(lecture_date) else f"{lecture_date}_{stem}.tex"
         archive_path = course_dir / archive_name
-        archive_path.write_text(final_latex, encoding="utf-8")
+        archive_path.write_text(tex_path.read_text(encoding="utf-8"), encoding="utf-8")
         console.print(f"[dim]Archived for course build: {archive_path}[/dim]")
     except Exception as e:
         console.print(f"[yellow]⚠ Course archive failed: {e}[/yellow]")
-
-    if compile_pdf_flag:
-        compile_pdf(
-            tex_path, pdf_output_dir, course_name, lecture_date, suffix,
-            auto_fix=auto_fix, backend=backend, backend_config=cfg,
-        )
 
     return tex_path

@@ -28,7 +28,12 @@ openai>=1.30           # OpenAI API (optional)
 # LaTeX utilities
 pylatex>=1.4           # For template generation helpers
 
+# Slide recognition + RAG embeddings (EmbeddingGemma 2, src/slides/eg2.py)
+# torch from PyPI (CUDA 13 build, separate nvidia-*-cu13 libs: the cu12 ones of faster-whisper stay)
+torchvision          # image processor of EmbeddingGemma 2
+sentence-transformers>=6.1
+transformers>=5.19
+
 # RAG (optional — needed only if rag.enabled: true)
 chromadb
-sentence-transformers
 pdfplumber

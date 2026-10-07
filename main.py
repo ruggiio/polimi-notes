@@ -538,9 +538,15 @@ def ingest_command(
     source: Path = typer.Argument(..., help="PDF file or directory to ingest"),
     course: str = typer.Option(..., "--course", "-c", help="Course name"),
     recursive: bool = typer.Option(False, "--recursive", "-r", help="Recurse into subdirectories"),
+    kind: str = typer.Option("third-party", "--kind", "-k",
+                             help="third-party (other students' notes: labelled as not authoritative) "
+                                  "or handout (official course material)"),
     config_path: Path = typer.Option(CONFIG_PATH, "--config"),
 ):
-    """Ingest PDFs (text only, pdfplumber) into the RAG database."""
+    """Ingest PDFs (text only, PyMuPDF: no OCR) into the RAG database."""
+    if kind not in ("third-party", "handout"):
+        console.print("[red]--kind must be third-party or handout[/red]")
+        raise typer.Exit(1)
     cfg = load_config(config_path)
     rag = _init_rag(cfg)
     if rag is None:
@@ -560,7 +566,7 @@ def ingest_command(
     console.print(f"[cyan]Ingesting {len(pdfs)} PDF(s) for '{course}'...[/cyan]")
     total = 0
     for p in pdfs:
-        chunks = rag.add_from_pdf(p, course)
+        chunks = rag.add_from_pdf(p, course, source=kind)
         total += chunks
         console.print(f"  [dim]{p.name}:[/dim] {chunks} chunks")
 
