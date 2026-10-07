@@ -575,6 +575,15 @@ def eg2_page_votes(decks: list[str], transcript: str, log=print) -> list[float] 
 LECTURE_NO = re.compile(r"(?:lecture|lezione|lesson|lect|lez|lec)[\s_.\-]*0*(\d{1,2})(?!\d)", re.I)
 
 
+LEADING_NO = re.compile(r"^\s*0*(\d{1,2})(?=[\s_.\-])")
+
+
+def leading_number(s: str) -> int | None:
+    """Numero in testa a un titolo o nome file: "01 - Intro to Python" → 1, "02_EMPS_inverse_dynamics" → 2."""
+    m = LEADING_NO.match(s)
+    return int(m.group(1)) if m else None
+
+
 def lecture_number(s: str) -> int | None:
     """Numero di lezione in un titolo o nome file: "Lecture 1. Intro…" → 1, "MOR_MEC_Lecture1_26" → 1."""
     m = LECTURE_NO.search(s)
@@ -894,8 +903,19 @@ def locate_and_extract(slides_root: Path, course_name: str, topic: str, out_dir:
                 log(f"slides: scartati {', '.join(paper)} (video senza slide, documento verticale)")
             chosen = [(d, i) for d, i in chosen if not _is_portrait(d)]
     if not chosen and notebooks:
-        picked = select_decks(notebooks, topic, transcript, max_decks=2)
-        if transcript and not blank:
+        # numero in testa all'argomento ("01 - Intro to Python") = modulo del corso: i notebook con lo
+        # stesso numero (01_intro_to_python, 01_intro_to_pytorch) sono quelli della lezione, tutti. Senza
+        # questo vinceva 02_EMPS_inverse_dynamics, del modulo dopo, per il molto codice PyTorch in comune
+        n = leading_number(topic)
+        same = [nb for nb in notebooks if n is not None and leading_number(nb.stem) == n]
+        if same:
+            ranked = select_decks(same, topic, transcript, max_decks=len(same)) if transcript else []
+            order = [d for d, _ in ranked] + [d for d in same if d not in {x for x, _ in ranked}]
+            info = dict(ranked)
+            picked = [(d, {"number": n, **info.get(d, {})}) for d in order[:3]]
+        else:
+            picked = select_decks(notebooks, topic, transcript, max_decks=2)
+        if transcript and not blank and not same:
             # senza la conferma del video (nessun video) il notebook deve almeno essere nell'argomento
             picked = [(d, i) for d, i in picked if i.get("topic", 0) > 0]
         if picked:
